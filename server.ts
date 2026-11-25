@@ -232,9 +232,8 @@ async function startServer() {
 
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '8mb' }));
-
-  // Apply a baseline abuse limit to every API endpoint, including endpoints
+  // Enforce API abuse limits before parsing attacker-controlled request bodies.
+    // Apply a baseline abuse limit to every API endpoint, including endpoints
   // that are added later and do not yet have a route-specific limiter.
   app.use('/api', (req, res, next) => {
     const authenticatedUser = getAuthenticatedUser(req);
@@ -253,6 +252,8 @@ async function startServer() {
     }
     next();
   });
+
+  app.use(express.json({ limit: '8mb' }));
 
   const uploadsDir = path.resolve(process.cwd(), 'data', 'uploads');
   app.use('/uploads', express.static(uploadsDir, { maxAge: '7d' }));
