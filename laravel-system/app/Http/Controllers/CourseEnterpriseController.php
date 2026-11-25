@@ -288,8 +288,10 @@ class CourseEnterpriseController extends Controller
             ->where('status', 'approved')
             ->firstOrFail();
 
-        $totalLessons = $course->lessons()->count();
-        $completedCount = count($enrollment->completed_lesson_ids ?? []);
+        $validLessonIds = $course->lessons()->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $totalLessons = count($validLessonIds);
+        $completedLessonIds = array_map('intval', $enrollment->completed_lesson_ids ?? []);
+        $completedCount = count(array_unique(array_intersect($completedLessonIds, $validLessonIds)));
         if ($totalLessons > 0 && $completedCount < $totalLessons) {
             return back()->withErrors(['certificate' => "Complete all {$totalLessons} lessons before claiming your certificate ({$completedCount}/{$totalLessons} done)."]);
         }
