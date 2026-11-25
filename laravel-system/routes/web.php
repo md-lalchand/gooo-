@@ -40,7 +40,7 @@ Route::get('/ebooks', [ShopController::class, 'ebooks'])->name('ebooks');
 Route::get('/board-result', [PublicController::class, 'results'])->name('results');
 Route::post('/board-result/lookup', [PublicController::class, 'lookupResult'])->middleware('throttle:30,5')->name('results.lookup');
 Route::get('/community', [PublicController::class, 'community'])->name('community');
-Route::post('/community/{post}/like', [PublicController::class, 'likeCommunityPost'])->name('community.like');
+Route::post('/community/{post}/like', [PublicController::class, 'likeCommunityPost'])->middleware('throttle:30,5')->name('community.like');
 Route::get('/verify-certificate', [PublicController::class, 'verifyCertificate'])->name('certificates.verify');
 Route::post('/verify-certificate', [PublicController::class, 'lookupCertificate'])->middleware('throttle:30,5')->name('certificates.lookup');
 Route::post('/payments/webhook/{gateway}', [PublicController::class, 'paymentWebhook'])->name('payments.webhook');
@@ -63,15 +63,15 @@ Route::middleware('auth')->group(function () {
     Route::post('/notifications/{notification}/read', [ProfileController::class, 'markNotificationRead'])->name('notifications.read');
     Route::post('/notifications/read-all', [ProfileController::class, 'markAllNotificationsRead'])->name('notifications.read_all');
 
-    Route::post('/community/post', [PublicController::class, 'submitCommunityPost'])->name('community.post');
+    Route::post('/community/post', [PublicController::class, 'submitCommunityPost'])->middleware('throttle:10,5')->name('community.post');
 
     Route::get('/learn', [PublicController::class, 'learn'])->name('learn');
-    Route::post('/learn/progress', [PublicController::class, 'markLessonComplete'])->name('learn.progress');
+    Route::post('/learn/progress', [PublicController::class, 'markLessonComplete'])->middleware('throttle:60,1')->name('learn.progress');
     Route::post('/learn/assignments/{assignment}/submit', [CourseEnterpriseController::class, 'submitAssignment'])->name('learn.assignments.submit');
     Route::post('/learn/scorm/{package}/complete', [CourseEnterpriseController::class, 'completeScorm'])->name('learn.scorm.complete');
     Route::post('/learn/courses/{course}/certificate', [CourseEnterpriseController::class, 'claimCourseCertificate'])->name('learn.certificate.claim');
 
-    Route::post('/courses/{course}/enroll', [PublicController::class, 'enroll'])->name('courses.enroll');
+    Route::post('/courses/{course}/enroll', [PublicController::class, 'enroll'])->middleware('throttle:10,5')->name('courses.enroll');
 
     Route::get('/exams', [ExamController::class, 'index'])->name('exams.index');
     Route::post('/exams/{exam}/submit', [ExamController::class, 'submit'])->name('exams.submit');
