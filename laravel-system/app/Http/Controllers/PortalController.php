@@ -1450,8 +1450,8 @@ class PortalController extends Controller
             'primary_color' => 'required|regex:/^#[0-9A-Fa-f]{6}$/',
             'accent_color' => 'required|regex:/^#[0-9A-Fa-f]{6}$/',
             'footer_text' => 'nullable|string|max:240',
-            'logo_file' => 'nullable|file|mimes:png,jpg,jpeg,webp,svg|max:4096',
-            'favicon_file' => 'nullable|file|mimes:png,jpg,jpeg,webp,svg,ico|max:2048',
+            'logo_file' => 'nullable|file|mimes:png,jpg,jpeg,webp|max:4096',
+            'favicon_file' => 'nullable|file|mimes:png,jpg,jpeg,webp,ico|max:2048',
         ]);
 
         $previousBrand = BrandSettings::all();
