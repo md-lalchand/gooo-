@@ -204,14 +204,14 @@ class AuthController extends Controller
 
             try {
                 $user->notify(new PasswordRecoveryToken($rawToken));
-            } catch (\\Throwable $exception) {
+            } catch (\Throwable $exception) {
                 report($exception);
             }
         }
 
         return redirect()
             ->route('recover', ['role' => $data['expected_role'] ?? 'student'])
-            ->with('status', 'If a matching account exists, a recovery token has been issued. Contact the Main Admin if you need assisted token issuance.');
+            ->with('status', 'If a matching account exists, recovery instructions will be sent to its registered email address.');
     }
 
     public function confirmPasswordReset(Request $request)
