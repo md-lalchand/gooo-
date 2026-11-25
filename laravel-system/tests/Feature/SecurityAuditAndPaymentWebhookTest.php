@@ -480,4 +480,66 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $this->actingAs($student)->post(route('ebooks.claim', $paidEbook))
             ->assertSessionHasErrors('ebook');
     }
+
+    public function test_webhook_cannot_settle_an_enrollment_that_is_no_longer_pending(): void
+    {
+        $branch = Branch::create([
+            'name' => 'Payment State Campus',
+            'code' => 'PSC',
+            'city' => 'Dhaka',
+            'address' => 'Road 1',
+            'status' => 'active',
+        ]);
+        $student = User::create([
+            'name' => 'Payment State Student',
+            'email' => 'payment-state@student.example',
+            'phone' => '01755551234',
+            'role' => 'student',
+            'branch_id' => $branch->id,
+            'roll_number' => 'AEC-2026-PS01',
+            'password' => Hash::make('StudentPass123!'),
+        ]);
+        $course = Course::create([
+            'slug' => 'payment-state-course',
+            'title' => 'Payment State Course',
+            'subtitle' => 'Test cohort',
+            'category' => 'IELTS',
+            'level_tag' => 'Advanced',
+            'price' => 1200,
+            'original_price' => 1200,
+            'description' => 'Payment state regression test.',
+            'status' => 'active',
+        ]);
+
+        $this->actingAs($student)->post(route('courses.enroll', $course), [
+            'branch_id' => $branch->id,
+            'payment_method' => 'Online Card / Gateway',
+        ])->assertRedirect();
+
+        $enrollment = Enrollment::where('user_id', $student->id)->firstOrFail();
+        $enrollment->update(['status' => 'rejected']);
+
+        $payload = json_encode([
+            'enrollment_id' => $enrollment->id,
+            'trx_id' => 'TRX-REJECTED-STATE',
+            'amount' => 1200,
+            'status' => 'SUCCESS',
+        ]);
+        $signature = hash_hmac('sha256', (string) $payload, (string) config('services.payment_webhook_secret'));
+
+        $this->call(
+            'POST',
+            '/payments/webhook/bkash',
+            [],
+            [],
+            [],
+            ['HTTP_X_WEBHOOK_SIGNATURE' => $signature, 'CONTENT_TYPE' => 'application/json'],
+            (string) $payload
+        )->assertStatus(409)->assertJson(['error' => 'Enrollment is not awaiting payment.']);
+
+        $this->assertSame('rejected', $enrollment->fresh()->status);
+        $this->assertSame(0, $course->fresh()->enrolled_count);
+        $this->assertSame(0, DB::table('financial_records')->count());
+    }
+
 }
