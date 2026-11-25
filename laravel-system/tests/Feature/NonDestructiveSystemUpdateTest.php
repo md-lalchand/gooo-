@@ -296,10 +296,10 @@ PHP
 
         $snapshot = BackupSnapshot::latest('id')->firstOrFail();
 
-        // 2. Download verified backup JSON
+        // 2. Download the verified portable ZIP backup
         $dl = $this->actingAs($admin)->get(route('portal.updates.backup.download', $snapshot));
         $dl->assertOk();
-        $dl->assertHeader('Content-Type', 'application/json');
+        $dl->assertHeader('Content-Type', 'application/zip');
 
         // 3. Mutate data (including parity tables) then restore backup snapshot and verify data recovery
         $invoice->delete();
