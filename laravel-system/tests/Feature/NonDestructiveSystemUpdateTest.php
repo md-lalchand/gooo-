@@ -530,6 +530,9 @@ PHP
         $this->assertArrayHasKey('uploads/storage-app-public/.backup-root', $manifest['entries'] ?? []);
         $zip->close();
 
+        // Backup encryption must survive APP_KEY rotation on the restore host.
+        config(['app.key' => 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=']);
+
         User::create([
             'name' => 'Post Snapshot User',
             'email' => 'after-snapshot@example.test',
