@@ -11,7 +11,7 @@ class BatchPolicy
 {
     public function viewAny(User $user): bool
     {
-        return in_array($user->role, ['admin', 'branch', 'teacher', 'student'], true);
+        return $user->role === 'admin' || ($user->role === 'branch' && $user->branch_id !== null) || in_array($user->role, ['teacher', 'student'], true);
     }
 
     public function view(User $user, Batch $batch): bool
@@ -20,7 +20,7 @@ class BatchPolicy
             return true;
         }
         if ($user->role === 'branch') {
-            return !$user->branch_id || (int) $batch->branch_id === (int) $user->branch_id;
+            return $user->branch_id !== null && (int) $batch->branch_id === (int) $user->branch_id;
         }
         if ($user->role === 'teacher') {
             return (int) $batch->main_teacher_id === (int) $user->id
@@ -38,7 +38,7 @@ class BatchPolicy
 
     public function create(User $user): bool
     {
-        return in_array($user->role, ['admin', 'branch'], true);
+        return $user->role === 'admin' || ($user->role === 'branch' && $user->branch_id !== null);
     }
 
     public function update(User $user, Batch $batch): bool
