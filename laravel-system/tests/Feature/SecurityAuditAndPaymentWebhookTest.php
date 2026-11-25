@@ -45,6 +45,20 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
     }
 
 
+
+    public function test_registration_rejects_weak_passwords(): void
+    {
+        $this->post(route('register.post'), [
+            'name' => 'Weak Password User',
+            'email' => 'weak-password@student.example',
+            'phone' => '01710000000',
+            'role' => 'student',
+            'password' => 'short',
+        ])->assertSessionHasErrors('password');
+
+        $this->assertDatabaseMissing('users', ['email' => 'weak-password@student.example']);
+    }
+
     public function test_self_service_password_recovery_emails_a_long_one_time_token(): void
     {
         Notification::fake();
