@@ -81,7 +81,6 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $this->assertNotNull($user->password_reset_expires_at);
         Notification::assertSentTo($user, PasswordRecoveryToken::class, function (PasswordRecoveryToken $notification) use ($user): bool {
             $rawTokenHash = $notification->tokenHash();
-            $rawToken = $token->getValue($notification);
 
             return strlen($rawTokenHash) === 64
                 && hash_equals($rawTokenHash, $user->password_reset_token_hash);
