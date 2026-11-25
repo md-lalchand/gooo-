@@ -108,7 +108,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
 
         $notification = Notification::sent($user, PasswordRecoveryToken::class)->first();
         $this->assertNotNull($notification);
-        $tokenProperty = new \\ReflectionProperty($notification, 'token');
+        $tokenProperty = new \ReflectionProperty($notification, 'token');
         $rawToken = $tokenProperty->getValue($notification);
 
         $this->post(route('recover.confirm'), [
