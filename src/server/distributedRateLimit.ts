@@ -78,3 +78,15 @@ export function distributedApiRateLimit(
     }
   };
 }
+
+/**
+ * Fail during process startup instead of accepting traffic that can only receive
+ * 503 responses because the shared production limiter is unavailable.
+ */
+export async function assertProductionRateLimitReady(): Promise<void> {
+  if (process.env.NODE_ENV !== 'production') return;
+  if (!(process.env.REDIS_URL ?? '').trim()) {
+    throw new Error('[SECURITY] REDIS_URL is required in production; refusing to start without shared API rate limiting.');
+  }
+  await getRedisClient();
+}

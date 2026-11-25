@@ -3,10 +3,21 @@
 ## 1. Primary Production Backend (Laravel 13 — `laravel-system/`)
 **Laravel 13 (`laravel-system/`)** is the primary production backend for live hosting deployments. The distributable archive is generated cleanly at `/downloads/academy-lms-laravel13.zip` without `.env`, `storage/installed.lock`, logs, or local databases.
 
+### Reverse Proxy, HTTPS & Session Cookie Configuration (Laravel)
+- Set `APP_URL=https://your-domain.example` and `SESSION_SECURE_COOKIE=true` for production HTTPS.
+- If Laravel is behind a reverse proxy, set `TRUSTED_PROXIES` to the proxy's exact private IP address(es) or CIDR(s), comma-separated. Laravel trusts forwarded headers only from those addresses; blank means none are trusted. Never use a wildcard or a broad public range.
+- Firewall the application origin so clients cannot bypass the trusted proxy and send forged forwarded headers directly.
+- Keep `SESSION_SAME_SITE=lax` unless a documented cross-site login/payment flow requires a different policy.
+
 ### Session Secret & Cookie Hardening (Laravel)
 - `APP_KEY`: Generated automatically during `/install` via `random_bytes(32)` (`base64:...`), never shipped in archives.
 - `SESSION_ENCRYPT=true` and `SESSION_HTTP_ONLY=true` are enabled by default in `laravel-system/config/session.php` and `laravel-system/.env.example`.
 - `SESSION_SECURE_COOKIE` defaults dynamically from HTTPS `APP_URL` and is written explicitly by the installer.
+
+### Production preflight checklist
+- Confirm the public origin is HTTPS, the proxy overwrites (not appends untrusted client values to) forwarded host/protocol headers, and direct origin access is blocked.
+- Confirm Node `REDIS_URL` is reachable from every application instance and Laravel `TRUSTED_PROXIES` contains only actual proxy addresses.
+- Verify login, logout, session expiry, client IP rate limiting, and webhook callbacks through the real proxy path before enabling live payments.
 
 ### Database SSL Configuration (Laravel)
 - **PostgreSQL (`pgsql`)**: Defaults to `DB_SSLMODE=require` in production (`prefer` locally) and supports `DB_SSLROOTCERT=/path/to/ca.pem` in `config/database.php` and `/install`.
@@ -18,6 +29,11 @@
 - Package updates (`SystemUpdateService::applyUpdateZip`) block path traversal, protect `.env*`, `storage/installed.lock`, `public/uploads/*`, and `*.sqlite`, run `migrate --force` incrementally, and roll back automatically on error.
 
 ---
+
+### Node.js Shared Rate Limit & Reverse Proxy
+- Production startup now requires `REDIS_URL` and verifies a Redis connection before listening. Use a private Redis endpoint (prefer `rediss://` with TLS), a dedicated ACL user/password, and network rules that do not expose Redis publicly.
+- Redis is the shared API rate-limit store. If it becomes unavailable after startup, API requests fail closed with HTTP 503; the application never falls back to per-process limits in production.
+- `TRUST_PROXY_HOPS` defaults to `0` (no proxy trust). Set it to the exact number of trusted reverse-proxy hops only when the origin is firewalled to accept traffic from that proxy chain. Do not set a large hop count or expose the origin directly; otherwise clients may spoof forwarded IP/protocol headers.
 
 ## 2. Interactive Preview & SaaS Workspace (Node.js + Express)
 - **Role Governance & Approval**: Strictly enforces `admin` (single Main Admin at DB level via `idx_single_main_admin`), `branch`, `teacher`, `student`, and `guardian`. Self-registrations enter `pending` status until Main Admin approval, with role-scoped login and password recovery (`/login/:role`, `/register/:role`, `/recover/:role`).
