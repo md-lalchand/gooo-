@@ -85,7 +85,7 @@ class InstallController extends Controller
             'roll_prefix' => 'required|string|max:12|alpha_num',
             'primary_color' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/',
             'accent_color' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/',
-            'logo_file' => 'nullable|file|mimes:png,jpg,jpeg,webp,svg|max:4096',
+            'logo_file' => 'nullable|file|mimes:png,jpg,jpeg,webp|max:4096',
             'db_connection' => 'required|in:sqlite,mysql,pgsql',
             'db_host' => 'nullable|string|max:120|regex:/^[A-Za-z0-9.:-]+$/',
             'db_port' => 'nullable|numeric',
