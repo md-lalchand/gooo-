@@ -80,6 +80,7 @@ import {
   type StoredUser,
 } from './src/server/store';
 import {
+  consumePublicRateLimit,
   deriveStudentGuardianLinkCode,
   pseudonymizeLeaderboardId,
   redactLessonForViewer,
