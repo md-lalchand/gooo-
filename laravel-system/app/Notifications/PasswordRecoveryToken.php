@@ -14,6 +14,11 @@ class PasswordRecoveryToken extends Notification
     {
     }
 
+    public function tokenHash(): string
+    {
+        return hash('sha256', $this->token);
+    }
+
     public function via(object $notifiable): array
     {
         return ['mail'];
