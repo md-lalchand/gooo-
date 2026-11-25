@@ -42,7 +42,7 @@ jobs:
       - name: Prepare isolated testing environment
         run: |
           cp .env.example .env
-          php artisan key:generate
+          printf 'APP_KEY=base64:%s\n' "$(openssl rand -base64 32 | tr -d '\n')" >> "$GITHUB_ENV"
           touch database/database.sqlite
       - name: Run Laravel Feature & Unit Test Suite
         run: php artisan test --stop-on-failure

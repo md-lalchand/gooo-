@@ -35,6 +35,7 @@ class FullLmsWorkflowTest extends TestCase
             $this->originalLock = file_get_contents($this->lockPath) ?: '';
         }
         file_put_contents($this->lockPath, json_encode(['installed' => true]));
+        config(['services.payment_webhook_secret' => 'test-dedicated-webhook-secret']);
     }
 
     protected function tearDown(): void
@@ -200,7 +201,7 @@ class FullLmsWorkflowTest extends TestCase
             'amount' => $enrollment->amount_paid,
             'status' => 'SUCCESS',
         ]);
-        $webhookSecret = (string) (env('PAYMENT_WEBHOOK_SECRET') ?: config('app.key'));
+        $webhookSecret = (string) config('services.payment_webhook_secret');
         $webhookSig = hash_hmac('sha256', (string) $webhookPayload, $webhookSecret);
         $this->call(
             'POST',
