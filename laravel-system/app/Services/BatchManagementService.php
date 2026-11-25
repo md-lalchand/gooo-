@@ -57,8 +57,12 @@ class BatchManagementService
     {
         $query = Batch::with(['course', 'branch', 'mainTeacher', 'assistantTeacher', 'teachers.user', 'schedules', 'classroom']);
 
-        if ($actor && $actor->role === 'branch' && $actor->branch_id) {
-            $query->where('branch_id', $actor->branch_id);
+        if ($actor && $actor->role === 'branch') {
+            if ($actor->branch_id) {
+                $query->where('branch_id', $actor->branch_id);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
         } elseif ($actor && $actor->role === 'teacher') {
             $query->where(function ($q) use ($actor) {
                 $q->where('main_teacher_id', $actor->id)
@@ -132,7 +136,19 @@ class BatchManagementService
                 'today_classes' => $todayClasses,
             ],
             'batches' => $batches,
-            'recent_activities' => BatchActivityLog::with('batch')->latest()->take(25)->get(),
+            'recent_activities' => (function () use ($actor) {
+                $activities = BatchActivityLog::with('batch');
+                if ($actor && $actor->role === 'branch') {
+                    $activities->whereHas('batch', fn ($q) => $q->where('branch_id', $actor->branch_id ?? 0));
+                } elseif ($actor && $actor->role === 'teacher') {
+                    $activities->whereHas('batch', function ($q) use ($actor) {
+                        $q->where('main_teacher_id', $actor->id)
+                            ->orWhere('assistant_teacher_id', $actor->id)
+                            ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $actor->id));
+                    });
+                }
+                return $activities->latest()->take(25)->get();
+            })(),
         ];
     }
 
@@ -198,6 +214,20 @@ class BatchManagementService
 
     public function createOrUpdateEnterpriseBatch(array $payload, User $actor, ?Batch $existing = null): Batch
     {
+        if ($actor->role === 'branch') {
+            if (!$actor->branch_id) {
+                abort(403, 'Branch account is not assigned to a branch.');
+            }
+            if ($existing && (int) $existing->branch_id !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts can only manage batches in their own branch.');
+            }
+            $requestedBranchId = $payload['branch_id'] ?? $existing?->branch_id;
+            if ($requestedBranchId !== null && (int) $requestedBranchId !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts cannot assign batches to another branch.');
+            }
+            $payload['branch_id'] = $actor->branch_id;
+        }
+
         $schedules = $payload['schedules'] ?? [];
         $branchId = isset($payload['branch_id']) ? (int) $payload['branch_id'] : null;
 
@@ -340,6 +370,10 @@ class BatchManagementService
 
     public function enrollStudent(Batch $batch, User $student, User $actor, string $paymentMethod = 'Cash / Office', ?int $amountPaid = null): Enrollment
     {
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $batch->branch_id !== (int) $actor->branch_id || (int) $student->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only enroll students assigned to their own branch.');
+        }
+
         return DB::transaction(function () use ($batch, $student, $actor, $paymentMethod, $amountPaid) {
             /** @var Batch $locked */
             $locked = Batch::whereKey($batch->id)->lockForUpdate()->firstOrFail();
@@ -384,6 +418,14 @@ class BatchManagementService
 
     public function transferStudent(Enrollment $enrollment, Batch $targetBatch, User $actor, string $reason = 'Batch schedule adjustment'): BatchTransfer
     {
+        if ($actor->role === 'branch') {
+            $sourceBranchId = $enrollment->batch?->branch_id ?? $enrollment->branch_id;
+            $studentBranchId = $enrollment->user?->branch_id;
+            if (!$actor->branch_id || (int) $sourceBranchId !== (int) $actor->branch_id || (int) $targetBatch->branch_id !== (int) $actor->branch_id || (int) $studentBranchId !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts can only transfer students between their own branch batches.');
+            }
+        }
+
         return DB::transaction(function () use ($enrollment, $targetBatch, $actor, $reason) {
             $firstId = min((int) ($enrollment->batch_id ?? 0), (int) $targetBatch->id);
             $secondId = max((int) ($enrollment->batch_id ?? 0), (int) $targetBatch->id);
@@ -444,13 +486,29 @@ class BatchManagementService
 
     public function recordBulkAttendance(Batch $batch, string $date, array $entries, User $actor): int
     {
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $batch->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only record attendance for their own branch batches.');
+        }
+
+        $enrolledStudentsQuery = Enrollment::where('batch_id', $batch->id)->where('status', 'approved');
+        if ($actor->role === 'branch') {
+            $enrolledStudentsQuery->whereHas('user', fn ($query) => $query->where('branch_id', $actor->branch_id));
+        }
+        $enrolledStudentIds = $enrolledStudentsQuery
+            ->pluck('user_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
         $saved = 0;
-        DB::transaction(function () use ($batch, $date, $entries, $actor, &$saved) {
+        DB::transaction(function () use ($batch, $date, $entries, $actor, &$saved, $enrolledStudentIds) {
             foreach ($entries as $row) {
                 $studentId = (int) ($row['student_id'] ?? 0);
                 $rawStatus = $row['status'] ?? 'present';
                 if (!$studentId || !in_array($rawStatus, ['present', 'absent', 'late', 'leave', 'excused'], true)) {
                     continue;
+                }
+                if (!in_array($studentId, $enrolledStudentIds, true)) {
+                    throw ValidationException::withMessages(['entries' => 'Attendance can only be recorded for approved students enrolled in this batch.']);
                 }
                 $status = $rawStatus === 'excused' ? 'leave' : $rawStatus;
                 $notes = $row['notes'] ?? null;

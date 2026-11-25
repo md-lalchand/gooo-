@@ -48,6 +48,7 @@ use App\Support\AuditRecorder;
 use App\Support\BrandSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 
@@ -122,7 +123,19 @@ class PortalController extends Controller
         }
 
         if ($role === 'branch') {
-            $batches = Batch::where('branch_id', $user->branch_id)->with(['course', 'branch'])->latest()->get();
+            if (!$user->branch_id) {
+                abort(403, 'Branch account is not assigned to a branch.');
+            }
+
+            $branchBatchIds = Batch::where('branch_id', $user->branch_id)->pluck('id');
+            $branchCourseIds = Batch::whereIn('id', $branchBatchIds)->distinct()->pluck('course_id');
+            $branches = Branch::whereKey($user->branch_id)->get();
+            $courses = Course::whereIn('id', $branchCourseIds)->latest()->get();
+            $batches = Batch::whereIn('id', $branchBatchIds)->with(['course', 'branch'])->latest()->get();
+            $lessons = Lesson::where(function ($query) use ($branchBatchIds, $branchCourseIds) {
+                $query->whereIn('batch_id', $branchBatchIds)->orWhereIn('course_id', $branchCourseIds);
+            })->with(['course', 'batch'])->orderBy('order_index')->get();
+            $exams = Exam::whereIn('course_id', $branchCourseIds)->with('questions')->get();
             $enrollments = Enrollment::where('branch_id', $user->branch_id)->with(['user', 'course'])->latest()->get();
             $users = User::where('branch_id', $user->branch_id)->get();
             $orders = Order::where('branch_pickup_id', $user->branch_id)->with('user')->latest()->get();
@@ -132,18 +145,40 @@ class PortalController extends Controller
             $academicYears = AcademicYear::latest()->get();
             $academicClasses = AcademicClass::latest()->get();
             return view('portal.index', compact(
-                'user', 'branches', 'courses', 'batches', 'users', 'enrollments',
+                'user', 'branches', 'courses', 'batches', 'lessons', 'exams', 'users', 'enrollments',
                 'orders', 'attendance', 'admissions', 'feeInvoices', 'academicYears',
                 'academicClasses', 'notifications'
             ));
         }
 
         if ($role === 'teacher') {
+            $teacherBatchIds = Batch::where(function ($query) use ($user) {
+                $query->where('main_teacher_id', $user->id)
+                    ->orWhere('assistant_teacher_id', $user->id)
+                    ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $user->id));
+            })->pluck('id');
+            $teacherCourseIds = Batch::whereIn('id', $teacherBatchIds)->distinct()->pluck('course_id')
+                ->merge(Exam::where('teacher_id', $user->id)->pluck('course_id'))
+                ->merge(CourseAssignment::where('created_by', $user->id)->pluck('course_id'))
+                ->filter()->unique()->values();
+            $teacherBranchIds = Batch::whereIn('id', $teacherBatchIds)->whereNotNull('branch_id')->distinct()->pluck('branch_id');
+
+            $branches = Branch::whereIn('id', $teacherBranchIds)->get();
+            $courses = Course::whereIn('id', $teacherCourseIds)->latest()->get();
+            $batches = Batch::whereIn('id', $teacherBatchIds)->with(['course', 'branch'])->latest()->get();
+            $lessons = Lesson::where(function ($query) use ($teacherBatchIds, $teacherCourseIds) {
+                $query->whereIn('batch_id', $teacherBatchIds)->orWhereIn('course_id', $teacherCourseIds);
+            })->with(['course', 'batch'])->orderBy('order_index')->get();
+            $exams = Exam::where('teacher_id', $user->id)->orWhereIn('course_id', $teacherCourseIds)->with('questions')->get();
             $questionBank = QuestionBankItem::latest()->get();
-            $courseModules = CourseModule::with(['course', 'chapters'])->orderBy('order_index')->get();
-            $assignments = CourseAssignment::with(['course', 'submissions.user'])->latest()->get();
-            $courseAnnouncements = CourseAnnouncement::with(['course', 'author'])->latest()->get();
-            $scormPackages = ScormPackage::with('course')->latest()->get();
+            $courseModules = CourseModule::whereIn('course_id', $teacherCourseIds)->with(['course', 'chapters'])->orderBy('order_index')->get();
+            $assignments = CourseAssignment::where(function ($query) use ($teacherCourseIds, $teacherBatchIds, $user) {
+                $query->whereIn('course_id', $teacherCourseIds)
+                    ->orWhereIn('batch_id', $teacherBatchIds)
+                    ->orWhere('created_by', $user->id);
+            })->with(['course', 'submissions.user'])->latest()->get();
+            $courseAnnouncements = CourseAnnouncement::whereIn('course_id', $teacherCourseIds)->with(['course', 'author'])->latest()->get();
+            $scormPackages = ScormPackage::whereIn('course_id', $teacherCourseIds)->with('course')->latest()->get();
             return view('portal.index', compact(
                 'user', 'branches', 'courses', 'batches', 'lessons', 'exams',
                 'questionBank', 'courseModules', 'assignments', 'courseAnnouncements',
@@ -309,8 +344,16 @@ class PortalController extends Controller
             'status' => 'required|in:open,running,closed',
         ]);
 
-        if ($actor->role === 'branch' && $actor->branch_id && (int) ($data['branch_id'] ?? 0) !== (int) $actor->branch_id) {
-            abort(403, 'Branch accounts can only create batches for their own branch.');
+        if ($actor->role === 'branch') {
+            if (!$actor->branch_id) {
+                abort(403, 'Branch account is not assigned to a branch.');
+            }
+            if (isset($data['branch_id']) && (int) $data['branch_id'] !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts can only create batches for their own branch.');
+            }
+            $data['branch_id'] = $actor->branch_id;
+        } elseif ($actor->role !== 'admin') {
+            abort(403);
         }
 
         $data['code'] = strtoupper(trim($data['code']));
@@ -321,7 +364,8 @@ class PortalController extends Controller
     public function updateBatch(Request $request, Batch $batch)
     {
         $actor = $request->user();
-        if ($actor->role === 'branch' && $actor->branch_id && (int) $batch->branch_id !== (int) $actor->branch_id) {
+        Gate::authorize('update', $batch);
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $batch->branch_id !== (int) $actor->branch_id)) {
             abort(403, 'Branch accounts can only update batches in their own branch.');
         }
 
@@ -338,6 +382,12 @@ class PortalController extends Controller
             'status' => 'required|in:open,running,closed',
         ]);
 
+        if ($actor->role === 'branch') {
+            if (isset($data['branch_id']) && (int) $data['branch_id'] !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts cannot move batches to another branch.');
+            }
+            $data['branch_id'] = $actor->branch_id;
+        }
         $data['code'] = strtoupper(trim($data['code']));
         $batch->update($data);
         return back()->with('status', 'Course batch updated.');
@@ -345,6 +395,7 @@ class PortalController extends Controller
 
     public function toggleBatchStatus(Request $request, Batch $batch)
     {
+        Gate::authorize('update', $batch);
         $data = $request->validate(['status' => 'required|in:open,running,closed']);
         $batch->update(['status' => $data['status']]);
         return back()->with('status', 'Batch status updated.');
@@ -353,8 +404,15 @@ class PortalController extends Controller
     public function deleteBatch(Request $request, Batch $batch)
     {
         $actor = $request->user();
-        if ($actor->role === 'branch' && $actor->branch_id && (int) $batch->branch_id !== (int) $actor->branch_id) {
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $batch->branch_id !== (int) $actor->branch_id)) {
             abort(403, 'Branch accounts can only delete batches in their own branch.');
+        }
+        if (!in_array($actor->role, ['admin', 'branch'], true)) {
+            abort(403);
+        }
+        $guard = app(\App\Services\BatchManagementService::class)->safeDeleteGuard($batch);
+        if (!$guard['can_delete']) {
+            return back()->withErrors(['batch' => $guard['reason']]);
         }
         $batch->delete();
         return back()->with('status', 'Course batch deleted.');
@@ -895,7 +953,7 @@ class PortalController extends Controller
     public function decideEnrollment(Request $request, Enrollment $enrollment)
     {
         $actor = $request->user();
-        if ($actor->role === 'branch' && $enrollment->branch_id !== $actor->branch_id) {
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $enrollment->branch_id !== (int) $actor->branch_id)) {
             abort(403, 'Branch accounts can only approve enrollments in their own branch.');
         }
 
@@ -912,6 +970,10 @@ class PortalController extends Controller
 
     public function updateOrder(Request $request, Order $order)
     {
+        $actor = $request->user();
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $order->branch_pickup_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only update orders assigned to their own branch.');
+        }
         $data = $request->validate(['status' => 'required|in:processing,shipped,delivered,cancelled']);
         $order->update(['status' => $data['status']]);
         return back()->with('status', 'Order status updated.');
@@ -1174,7 +1236,27 @@ class PortalController extends Controller
             'status' => 'required|in:present,absent,late,leave',
             'attendance_date' => 'required|date',
         ]);
+        $actor = $request->user();
         $target = User::findOrFail($data['target_id']);
+        if (!in_array($target->role, ['student', 'teacher'], true)) {
+            abort(403, 'Attendance can only be recorded for students or teachers.');
+        }
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $target->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only record attendance for users in their own branch.');
+        }
+        if ($actor->role === 'teacher') {
+            if ($target->role !== 'student') {
+                abort(403, 'Teachers can only record attendance for their enrolled students.');
+            }
+            $assignedBatchIds = Batch::where(function ($query) use ($actor) {
+                $query->where('main_teacher_id', $actor->id)
+                    ->orWhere('assistant_teacher_id', $actor->id)
+                    ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $actor->id));
+            })->pluck('id');
+            if (!Enrollment::where('user_id', $target->id)->where('status', 'approved')->whereIn('batch_id', $assignedBatchIds)->exists()) {
+                abort(403, 'Teachers can only record attendance for students enrolled in their assigned batches.');
+            }
+        }
         AttendanceRecord::updateOrCreate(
             ['target_id' => $target->id, 'attendance_date' => $data['attendance_date']],
             [
@@ -1200,6 +1282,12 @@ class PortalController extends Controller
             'advance' => 'nullable|integer|min:0',
         ]);
 
+        $actor = $request->user();
+        $employee = User::findOrFail($data['employee_id']);
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $employee->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only generate payroll for employees in their own branch.');
+        }
+
         if (PayrollRecord::where('employee_id', $data['employee_id'])->where('month_key', $data['month_key'])->exists()) {
             return back()->withErrors(['payroll' => 'Duplicate payroll guard: Salary already exists for this month.']);
         }
@@ -1222,6 +1310,10 @@ class PortalController extends Controller
 
     public function markPayrollPaid(PayrollRecord $payroll, Request $request)
     {
+        $actor = $request->user();
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $payroll->employee?->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only pay employees in their own branch.');
+        }
         if ($payroll->status !== 'paid') {
             $payroll->update(['status' => 'paid']);
             FinancialRecord::create([

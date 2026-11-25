@@ -118,7 +118,11 @@ class EnterpriseOpsController extends Controller
             'notes' => 'nullable|string|max:1000',
         ]);
 
-        if ($actor->role === 'branch' && $actor->branch_id) {
+        if ($actor->role === 'branch') {
+            $student = \App\Models\User::findOrFail($data['student_id']);
+            if (!$actor->branch_id || (int) $student->branch_id !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts can only admit students assigned to their own branch.');
+            }
             $data['branch_id'] = $actor->branch_id;
         }
 
@@ -135,13 +139,21 @@ class EnterpriseOpsController extends Controller
 
     public function updateAdmissionStatus(Request $request, StudentAdmission $admission)
     {
+        $actor = $request->user();
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $admission->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only update admissions in their own branch.');
+        }
         $data = $request->validate(['status' => 'required|in:active,pending,transferred,graduated']);
         $admission->update(['status' => $data['status']]);
         return back()->with('status', "Admission {$admission->admission_no} updated to {$data['status']}.");
     }
 
-    public function deleteAdmission(StudentAdmission $admission)
+    public function deleteAdmission(Request $request, StudentAdmission $admission)
     {
+        $actor = $request->user();
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $admission->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only delete admissions in their own branch.');
+        }
         $admission->delete();
         return back()->with('status', 'Admission record removed.');
     }
@@ -159,7 +171,11 @@ class EnterpriseOpsController extends Controller
             'due_date' => 'nullable|date',
         ]);
 
-        if ($actor->role === 'branch' && $actor->branch_id) {
+        if ($actor->role === 'branch') {
+            $student = \App\Models\User::findOrFail($data['user_id']);
+            if (!$actor->branch_id || (int) $student->branch_id !== (int) $actor->branch_id) {
+                abort(403, 'Branch accounts can only invoice students assigned to their own branch.');
+            }
             $data['branch_id'] = $actor->branch_id;
         }
 
@@ -186,7 +202,7 @@ class EnterpriseOpsController extends Controller
     public function recordFeePayment(Request $request, FeeInvoice $invoice)
     {
         $actor = $request->user();
-        if ($actor->role === 'branch' && $actor->branch_id && (int) $invoice->branch_id !== (int) $actor->branch_id) {
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $invoice->branch_id !== (int) $actor->branch_id)) {
             abort(403, 'Branch accounts can only collect fees for their own branch.');
         }
 
@@ -226,8 +242,12 @@ class EnterpriseOpsController extends Controller
         return back()->with('status', "Payment recorded on {$invoice->invoice_no} ({$nextStatus}).");
     }
 
-    public function deleteFeeInvoice(FeeInvoice $invoice)
+    public function deleteFeeInvoice(Request $request, FeeInvoice $invoice)
     {
+        $actor = $request->user();
+        if ($actor->role === 'branch' && (!$actor->branch_id || (int) $invoice->branch_id !== (int) $actor->branch_id)) {
+            abort(403, 'Branch accounts can only delete invoices in their own branch.');
+        }
         $invoice->delete();
         return back()->with('status', 'Fee invoice deleted.');
     }
