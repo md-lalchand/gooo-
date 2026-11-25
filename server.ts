@@ -1066,7 +1066,7 @@ async function startServer() {
       return;
     }
     if (newPassword.trim()) {
-      if (!isStrongPassword(newPassword.trim(), 8)) {
+      if (!isStrongPassword(newPassword.trim(), 12)) {
         res.status(400).json({
           error: 'New password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
         });
