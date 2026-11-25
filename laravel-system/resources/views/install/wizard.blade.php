@@ -125,11 +125,20 @@
                     <div id="db-ssl-wrap" class="hidden">
                         <label for="db_sslmode" class="block text-xs font-semibold text-slate-700 mb-1">Database SSL Mode</label>
                         <select id="db_sslmode" name="db_sslmode" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white">
-                            <option value="prefer" @selected(old('db_sslmode', 'prefer') === 'prefer')>Prefer TLS</option>
-                            <option value="require" @selected(old('db_sslmode') === 'require')>Require TLS</option>
+                            <option value="prefer" @selected(old('db_sslmode', 'require') === 'prefer')>Prefer TLS</option>
+                            <option value="require" @selected(old('db_sslmode', 'require') === 'require')>Require TLS</option>
+                            <option value="verify-ca" @selected(old('db_sslmode') === 'verify-ca')>Verify CA</option>
                             <option value="verify-full" @selected(old('db_sslmode') === 'verify-full')>Verify Full (Strict CA)</option>
                             <option value="disable" @selected(old('db_sslmode') === 'disable')>Disable (Local Dev Only)</option>
                         </select>
+                    </div>
+                    <div id="db-pgsql-ca-wrap" class="hidden sm:col-span-2">
+                        <label for="db_sslrootcert" class="block text-xs font-semibold text-slate-700 mb-1">PostgreSQL CA Certificate Path (required for verify modes)</label>
+                        <input id="db_sslrootcert" type="text" name="db_sslrootcert" value="{{ old('db_sslrootcert') }}" placeholder="/etc/ssl/certs/postgres-ca.pem" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                    </div>
+                    <div id="db-mysql-ca-wrap" class="hidden sm:col-span-2">
+                        <label for="db_ssl_ca" class="block text-xs font-semibold text-slate-700 mb-1">MySQL CA Certificate Path (required for remote TLS)</label>
+                        <input id="db_ssl_ca" type="text" name="db_ssl_ca" value="{{ old('db_ssl_ca') }}" placeholder="/etc/ssl/certs/mysql-ca.pem" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     </div>
                 </div>
             </div>
@@ -146,8 +155,8 @@
                         <input id="admin_email" type="email" name="admin_email" value="{{ old('admin_email', '') }}" required placeholder="admin@yourcompany.com" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     </div>
                     <div>
-                        <label for="admin_password" class="block text-xs font-semibold text-slate-700 mb-1">Password (8+ chars) *</label>
-                        <input id="admin_password" type="password" name="admin_password" required minlength="8" placeholder="Minimum 8 characters" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                        <label for="admin_password" class="block text-xs font-semibold text-slate-700 mb-1">Password (12+ chars) *</label>
+                        <input id="admin_password" type="password" name="admin_password" required minlength="12" placeholder="12+ chars, upper/lowercase, number & symbol" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     </div>
                 </div>
             </div>
@@ -164,6 +173,8 @@
             ['db-host-wrap', 'db-port-wrap', 'db-user-wrap', 'db-pass-wrap', 'db-ssl-wrap'].forEach((id) => {
                 document.getElementById(id).classList.toggle('hidden', !isSqlServer);
             });
+            document.getElementById('db-pgsql-ca-wrap').classList.toggle('hidden', driver !== 'pgsql');
+            document.getElementById('db-mysql-ca-wrap').classList.toggle('hidden', driver !== 'mysql');
             const dbInput = document.getElementById('db_database');
             const portInput = document.getElementById('db_port');
             if (driver === 'sqlite' && !dbInput.value.endsWith('.sqlite')) {
