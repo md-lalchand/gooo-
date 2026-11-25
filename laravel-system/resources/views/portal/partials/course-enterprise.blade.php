@@ -131,6 +131,10 @@
             <h3 class="text-sm font-extrabold text-slate-900">Build Exam from Question Bank</h3>
             <form method="POST" action="{{ route('portal.exams.from_bank') }}" class="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
                 @csrf
+                <select name="course_id" {{ $user->role === 'teacher' ? 'required' : '' }} class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs sm:col-span-2">
+                    @if($user->role === 'admin')<option value="">General Exam (not course-linked)</option>@endif
+                    @foreach($courses as $c)<option value="{{ $c->id }}">{{ $c->title }}</option>@endforeach
+                </select>
                 <input type="text" name="title" required placeholder="New Exam Title" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs sm:col-span-2">
                 <input type="text" name="category" required value="Assessment" placeholder="Category" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs">
                 <input type="text" name="subject" placeholder="Filter Subject (optional)" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs">
@@ -146,8 +150,8 @@
         <h3 class="text-sm font-extrabold text-slate-900">SCORM 1.2 Interactive Modules ({{ ($scormPackages ?? collect())->count() }})</h3>
         <form method="POST" action="{{ route('portal.scorm.store') }}" class="grid grid-cols-1 md:grid-cols-4 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
             @csrf
-            <select name="course_id" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs">
-                <option value="">Any Course</option>
+            <select name="course_id" {{ $user->role === 'teacher' ? 'required' : '' }} class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs">
+                @if($user->role === 'admin')<option value="">Any Course</option>@endif
                 @foreach($courses as $c)
                     <option value="{{ $c->id }}">{{ $c->title }}</option>
                 @endforeach
