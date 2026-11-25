@@ -206,6 +206,12 @@ class AuthController extends Controller
             try {
                 $user->notify(new PasswordRecoveryToken($rawToken));
             } catch (\Throwable $exception) {
+                User::whereKey($user->id)
+                    ->where('password_reset_token_hash', hash('sha256', $rawToken))
+                    ->update([
+                        'password_reset_token_hash' => null,
+                        'password_reset_expires_at' => null,
+                    ]);
                 report($exception);
             }
         }
