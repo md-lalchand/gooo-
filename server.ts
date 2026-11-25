@@ -479,9 +479,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh phone number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 10)) {
+    if (!isStrongPassword(password, 12)) {
       res.status(400).json({
-        error: 'Main Admin password must be at least 10 characters and include both letters and numbers.',
+        error: 'Main Admin password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
       });
       return;
     }
@@ -571,9 +571,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 8)) {
+    if (!isStrongPassword(password, 12)) {
       res.status(400).json({
-        error: 'Password must be at least 8 characters and include both letters and numbers.',
+        error: 'Password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
       });
       return;
     }
@@ -1008,9 +1008,9 @@ async function startServer() {
   app.post('/api/auth/password-reset/confirm', (req, res) => {
     const token = String(req.body?.token ?? '').trim();
     const newPassword = String(req.body?.newPassword ?? '');
-    if (!token || !isStrongPassword(newPassword, 8)) {
+    if (!token || !isStrongPassword(newPassword, 12)) {
       res.status(400).json({
-        error: 'Valid reset token and strong new password (min 8 chars with letters and numbers) are required.',
+        error: 'Valid reset token and strong new password (12+ characters with uppercase, lowercase, numbers, and symbols) are required.',
       });
       return;
     }
@@ -1066,9 +1066,9 @@ async function startServer() {
       return;
     }
     if (newPassword.trim()) {
-      if (!isStrongPassword(newPassword.trim(), 8)) {
+      if (!isStrongPassword(newPassword.trim(), 12)) {
         res.status(400).json({
-          error: 'New password must be at least 8 characters and include both letters and numbers.',
+          error: 'New password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
         });
         return;
       }
@@ -3946,9 +3946,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh phone number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 8)) {
+    if (!isStrongPassword(password, 12)) {
       res.status(400).json({
-        error: 'A strong password (min 8 chars with letters and numbers) is required for every new user.',
+        error: 'A strong password (12+ characters with uppercase, lowercase, numbers, and symbols) is required for every new user.',
       });
       return;
     }
@@ -4124,7 +4124,7 @@ async function startServer() {
       target.guardianLinkedStudentIds = req.body.guardianLinkedStudentIds.map(String);
     }
     if (typeof req.body?.password === 'string' && req.body.password.trim()) {
-      if (!isStrongPassword(req.body.password.trim(), 8)) {
+      if (!isStrongPassword(req.body.password.trim(), 12)) {
         res.status(400).json({ error: 'Password must be at least 8 characters and include letters and numbers.' });
         return;
       }
