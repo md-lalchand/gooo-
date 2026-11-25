@@ -247,6 +247,29 @@ class PublicController extends Controller
             return response()->json(['error' => 'Payment webhook secret is not configured.'], 503);
         }
 
+        // A webhook URL must identify one configured, active online/MFS gateway.
+        // Manual bank/cash methods must never be settled by an external callback.
+        $gatewaysRaw = DB::table('settings')->where('key', 'payment_gateways')->value('value');
+        $configuredGateways = $gatewaysRaw
+            ? (json_decode($gatewaysRaw, true) ?? [])
+            : PortalController::defaultPaymentGateways();
+        $routeGateway = strtolower(trim($gateway));
+        $matchedGateway = collect($configuredGateways)->first(function ($configured) use ($routeGateway) {
+            if (empty($configured['active']) || !in_array($configured['provider_type'] ?? '', ['mfs', 'online'], true)) {
+                return false;
+            }
+
+            $configuredId = strtolower(trim((string) ($configured['id'] ?? '')));
+            $configuredName = \Illuminate\Support\Str::slug((string) ($configured['name'] ?? ''));
+
+            return ($configuredId !== '' && hash_equals($configuredId, $routeGateway))
+                || ($configuredName !== '' && hash_equals($configuredName, \Illuminate\Support\Str::slug($routeGateway)));
+        });
+
+        if (!$matchedGateway) {
+            return response()->json(['error' => 'Payment gateway is not active or does not accept webhooks.'], 404);
+        }
+
         $signedPayload = $rawBody !== '' ? $rawBody : (string) json_encode($request->only(['enrollment_id', 'trx_id', 'amount', 'status']));
         $expectedSig = hash_hmac('sha256', $signedPayload, $secret);
 
@@ -261,38 +284,66 @@ class PublicController extends Controller
             'status' => 'required|string|in:SUCCESS,VALID,COMPLETED',
         ]);
 
-        $enrollment = Enrollment::with(['course', 'user'])->findOrFail($data['enrollment_id']);
+        $enrollment = Enrollment::findOrFail($data['enrollment_id']);
+        if (strcasecmp(trim((string) $enrollment->payment_method), trim((string) ($matchedGateway['name'] ?? ''))) !== 0) {
+            return response()->json(['error' => 'Webhook gateway does not match the enrollment payment method.'], 409);
+        }
+
         if ((int) $data['amount'] !== (int) $enrollment->amount_paid) {
             return response()->json(['error' => 'Webhook amount mismatch.'], 400);
         }
 
-        if ($enrollment->status === 'approved') {
-            return response()->json(['ok' => true, 'deduplicated' => true, 'enrollment_id' => $enrollment->id]);
-        }
-
         $cleanTrx = strtoupper(trim($data['trx_id']));
-        if (Enrollment::where('trx_id', $cleanTrx)->where('id', '!=', $enrollment->id)->exists()) {
-            return response()->json(['error' => 'Duplicate Transaction ID rejected.'], 409);
-        }
+        $settlement = DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
+            if (Enrollment::where('trx_id', $cleanTrx)
+                ->where('id', '!=', $enrollment->id)
+                ->exists()
+            ) {
+                return 'duplicate_trx';
+            }
 
-        DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
-            $enrollment->update([
-                'status' => 'approved',
-                'trx_id' => $cleanTrx,
-            ]);
-            if ($enrollment->course) {
-                $enrollment->course->increment('enrolled_count');
+            // The conditional status update is the atomic claim on this enrollment.
+            // Concurrent callbacks can only move pending -> approved once.
+            $updated = Enrollment::whereKey($enrollment->id)
+                ->where('status', 'pending')
+                ->update([
+                    'status' => 'approved',
+                    'trx_id' => $cleanTrx,
+                    'updated_at' => now(),
+                ]);
+
+            if ($updated === 0) {
+                $current = Enrollment::findOrFail($enrollment->id);
+                return $current->status === 'approved' ? 'deduplicated' : 'not_pending';
+            }
+
+
+            $settled = Enrollment::with(['course', 'user'])->findOrFail($enrollment->id);
+            if ($settled->course) {
+                $settled->course->increment('enrolled_count');
             }
             FinancialRecord::create([
                 'type' => 'income',
                 'category' => 'Verified Gateway Payment',
-                'title' => "{$gateway} ({$enrollment->invoice_no}) — {$enrollment->user?->name}",
-                'amount' => $enrollment->amount_paid,
-                'branch_id' => $enrollment->branch_id,
+                'title' => "{$gateway} ({$settled->invoice_no}) — {$settled->user?->name}",
+                'amount' => $settled->amount_paid,
+                'branch_id' => $settled->branch_id,
                 'entry_date' => now()->toDateString(),
                 'recorded_by' => "{$gateway} Webhook",
             ]);
+
+            return 'approved';
         });
+
+        if ($settlement === 'deduplicated') {
+            return response()->json(['ok' => true, 'deduplicated' => true, 'enrollment_id' => $enrollment->id]);
+        }
+        if ($settlement === 'not_pending') {
+            return response()->json(['error' => 'Enrollment is not awaiting payment.'], 409);
+        }
+        if ($settlement === 'duplicate_trx') {
+            return response()->json(['error' => 'Duplicate Transaction ID rejected.'], 409);
+        }
 
         return response()->json(['ok' => true, 'enrollment_id' => $enrollment->id, 'status' => 'approved']);
     }
