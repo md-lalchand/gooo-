@@ -558,7 +558,7 @@ PHP
         $this->cleanupFiles[] = $archivePath;
 
         $zip = new ZipArchive();
-        $this->assertTrue($zip->open($archivePath, ZipArchive::RDWR));
+        $this->assertTrue($zip->open($archivePath, 0));
         $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
         $this->assertSame('lms-portable-backup-v2', $manifest['format'] ?? null);
         $this->assertArrayHasKey('hmac_sha256', $manifest);
@@ -584,7 +584,7 @@ PHP
         $this->cleanupFiles[] = $archivePath;
 
         $zip = new ZipArchive();
-        $this->assertTrue($zip->open($archivePath, ZipArchive::RDWR));
+        $this->assertTrue($zip->open($archivePath, 0));
         $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
         $manifest['format'] = 'lms-portable-backup-v1';
         unset($manifest['hmac_sha256']);
