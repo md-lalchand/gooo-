@@ -611,6 +611,7 @@ PHP
         try {
             $service = app(SystemUpdateService::class);
             $snapshot = $service->createFullBackup('Backup Admin', 'Dynamic table coverage')['snapshot'];
+            $service->verifyPortableBackupArchive($snapshot);
             $payload = json_decode((string) $snapshot->payload_json, true);
             $this->assertSame('lms-full-backup-v2-streamed', $payload['format'] ?? null);
             $this->assertSame(1, $payload['table_counts']['plugin_custom_data'] ?? null);
