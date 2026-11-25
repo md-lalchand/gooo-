@@ -40,6 +40,7 @@ import { createBatchEnterpriseRouter } from './src/server/batchEnterpriseRoutes'
 import { createCourseEnterpriseRouter } from './src/server/courseEnterpriseRoutes';
 import { createEnterpriseOpsRouter } from './src/server/enterpriseOpsRoutes';
 import { createPlatformRouter } from './src/server/platformRoutes';
+import { distributedApiRateLimit } from './src/server/distributedRateLimit';
 import {
   checkLoginRateLimit,
   clearLoginRateLimit,
@@ -79,7 +80,6 @@ import {
   type StoredUser,
 } from './src/server/store';
 import {
-  consumePublicRateLimit,
   deriveStudentGuardianLinkCode,
   pseudonymizeLeaderboardId,
   redactLessonForViewer,
@@ -231,27 +231,28 @@ async function startServer() {
   getDb();
 
   const app = express();
-  app.set('trust proxy', 1);
-  // Enforce API abuse limits before parsing attacker-controlled request bodies.
-    // Apply a baseline abuse limit to every API endpoint, including endpoints
-  // that are added later and do not yet have a route-specific limiter.
-  app.use('/api', (req, res, next) => {
-    const authenticatedUser = getAuthenticatedUser(req);
-    const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
-    const bucket = authenticatedUser
-      ? `api:${authenticatedUser.id}`
-      : `api:guest:${getClientIp(req)}`;
-    const limit = authenticatedUser
-      ? (isRead ? 300 : 120)
-      : (isRead ? 120 : 30);
-    const rate = consumePublicRateLimit(bucket, limit, 60 * 1000);
-    if (!rate.allowed) {
-      res.setHeader('Retry-After', String(rate.retryAfterSeconds));
-      res.status(429).json({ error: 'API rate limit reached. Please retry later.' });
-      return;
+  const trustedProxyHops = process.env.TRUST_PROXY_HOPS;
+  if (trustedProxyHops === undefined || trustedProxyHops.trim() === '') {
+    app.set('trust proxy', false);
+  } else {
+    const hops = Number(trustedProxyHops);
+    if (!Number.isSafeInteger(hops) || hops < 0 || hops > 10) {
+      throw new Error('[SECURITY] TRUST_PROXY_HOPS must be an integer from 0 to 10.');
     }
-    next();
-  });
+    app.set('trust proxy', hops);
+  }
+  // All API endpoints share Redis counters in production, including future routes.
+  app.use('/api', distributedApiRateLimit(
+    (req) => {
+      const authenticatedUser = getAuthenticatedUser(req);
+      return authenticatedUser ? `user:${authenticatedUser.id}` : `guest:${getClientIp(req)}`;
+    },
+    (req) => {
+      const authenticatedUser = getAuthenticatedUser(req);
+      const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+      return authenticatedUser ? (isRead ? 300 : 120) : (isRead ? 120 : 30);
+    }
+  ));
 
   app.use(express.json({ limit: '8mb' }));
 
