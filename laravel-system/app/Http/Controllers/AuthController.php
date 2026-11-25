@@ -4,11 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Models\Branch;
 use App\Models\User;
+use App\Notifications\PasswordRecoveryToken;
 use App\Support\BrandSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 
 class AuthController extends Controller
 {
@@ -96,7 +98,7 @@ class AuthController extends Controller
             'branch_code' => 'nullable|string|max:32',
             'branch_city' => 'nullable|string|max:80',
             'branch_address' => 'nullable|string|max:240',
-            'password' => 'required|string|min:6',
+            'password' => ['required', 'string', Password::min(12)->mixedCase()->numbers()->symbols()],
         ]);
 
         $linkedStudent = null;
