@@ -66,9 +66,12 @@ export function isValidRole(role: unknown): role is UserRole {
   );
 }
 
-export function isStrongPassword(password: string, minLength = 8): boolean {
+export function isStrongPassword(password: string, minLength = 12): boolean {
   if (typeof password !== 'string' || password.length < minLength) return false;
-  return /[A-Za-z]/.test(password) && /\d/.test(password);
+  return /[A-Z]/.test(password)
+    && /[a-z]/.test(password)
+    && /\d/.test(password)
+    && /[^A-Za-z0-9]/.test(password);
 }
 
 export function isValidBangladeshPhone(phone: string): boolean {
