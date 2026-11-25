@@ -37,6 +37,17 @@
 - Review the decrypted environment file before changing the active `.env`; restart services after the change.
 - Never delete the only copy of the pre-release backup or the separately escrowed `BACKUP_ENCRYPTION_KEY`.
 
-## Deployment credentials
+## Guarded production deployment workflow
 
-Actual production deployment is intentionally not run by repository CI. It requires the owner's production host, SSH/deployment credentials, service names, domain/health URL, and approval. Add these to the hosting secret manager and use the organization's existing deployment process; do not place them in this repository.
+After this PR is merged to `main`, the repository includes a manual GitHub Actions workflow at **Actions → Guarded Production Deployment**. It is intentionally not triggered by pushes or pull requests.
+
+Configure a protected GitHub Environment named `production` with required reviewers, then add these Environment secrets:
+- `PROD_SSH_HOST`
+- `PROD_SSH_USER`
+- `PROD_SSH_PRIVATE_KEY`
+- `PROD_SSH_KNOWN_HOSTS` (pinned host key; do not use `ssh-keyscan` at deploy time)
+- `PROD_DEPLOY_PATH` (existing Git checkout on the host)
+
+When manually dispatching the workflow, provide the actual Node and PHP-FPM systemd service names and both health URLs, and confirm the verified off-host backup gate. The remote host must have Git, Composer, PHP/extensions, Node/npm, sudo permission for the specified service restart/reload, and network access to its database and Redis. The deployment script keeps Laravel maintenance mode active through migrations/build/restarts and runs both HTTP health checks before reporting success.
+
+The workflow does not create or guess infrastructure credentials. Until the owner configures the protected environment and secrets, no production deployment can be executed. Do not place credentials in this repository.
