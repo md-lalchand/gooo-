@@ -253,7 +253,7 @@ class BranchTenantIsolationTest extends TestCase
         $batchA->update(['main_teacher_id' => $teacherA->id]);
         $batchB->update(['main_teacher_id' => $teacherB->id]);
 
-        Lesson::create([
+        $lessonA = Lesson::create([
             'course_id' => $courseA->id,
             'batch_id' => $batchA->id,
             'lesson_type' => 'recorded',
@@ -262,7 +262,7 @@ class BranchTenantIsolationTest extends TestCase
             'duration' => '30 min',
             'order_index' => 1,
         ]);
-        Lesson::create([
+        $lessonB = Lesson::create([
             'course_id' => $courseB->id,
             'batch_id' => $batchB->id,
             'lesson_type' => 'recorded',
@@ -277,16 +277,14 @@ class BranchTenantIsolationTest extends TestCase
             ->assertOk()
             ->assertSee('North Branch Curriculum')
             ->assertDontSee('South Branch Curriculum')
-            ->assertSee('North Private Lesson')
-            ->assertDontSee('South Private Lesson');
+            ->assertViewHas('lessons', fn ($lessons) => $lessons->contains('id', $lessonA->id) && !$lessons->contains('id', $lessonB->id));
 
         $this->actingAs($teacherA)
             ->get(route('portal.index'))
             ->assertOk()
             ->assertSee('North Branch Curriculum')
             ->assertDontSee('South Branch Curriculum')
-            ->assertSee('North Private Lesson')
-            ->assertDontSee('South Private Lesson');
+            ->assertViewHas('lessons', fn ($lessons) => $lessons->contains('id', $lessonA->id) && !$lessons->contains('id', $lessonB->id));
     }
 
     public function test_branch_dashboard_activity_feed_is_scoped_to_its_own_branch(): void
