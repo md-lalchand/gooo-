@@ -356,9 +356,9 @@ class TeacherCourseAccessTest extends TestCase
         ]);
 
         $foreignCourse = $this->makeCourse('Foreign Exam Course');
-        $examA = Exam::create(['course_id' => $course->id, 'title' => 'Enrolled Course Exam', 'category' => 'Test']);
-        $examB = Exam::create(['course_id' => $foreignCourse->id, 'title' => 'Foreign Course Exam', 'category' => 'Test']);
-        $globalExam = Exam::create(['title' => 'General Exam', 'category' => 'General']);
+        $examA = Exam::create(['course_id' => $course->id, 'teacher_id' => $teacherA->id, 'title' => 'Enrolled Course Exam', 'category' => 'Test']);
+        $examB = Exam::create(['course_id' => $foreignCourse->id, 'teacher_id' => $teacherB->id, 'title' => 'Foreign Course Exam', 'category' => 'Test']);
+        $globalExam = Exam::create(['teacher_id' => $teacherA->id, 'title' => 'General Exam', 'category' => 'General']);
 
         $learn = $this->actingAs($student)->get(route('learn'))->assertOk();
         $learn->assertSee('Shared Course Lesson')
