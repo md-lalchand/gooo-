@@ -446,9 +446,13 @@ class SystemUpdateService
         ?callable $postCopyHook = null
     ): SystemUpdate {
         $basePath = rtrim($targetBasePath ?? base_path(), DIRECTORY_SEPARATOR);
+        if (!is_dir($basePath) || realpath($basePath) === false) {
+            throw new RuntimeException('Update target directory does not exist.');
+        }
+        $basePath = realpath($basePath);
+
         $inspection = $this->inspectUpdateZip($zipPath);
         $manifest = $inspection['manifest'];
-
         if (!empty($manifest['min_php']) && version_compare(PHP_VERSION, (string) $manifest['min_php'], '<')) {
             throw new RuntimeException("Update requires PHP {$manifest['min_php']}+ (running " . PHP_VERSION . ').');
         }
@@ -456,7 +460,6 @@ class SystemUpdateService
         $fromVersion = $this->currentVersion();
         $toVersion = trim((string) ($manifest['version'] ?? '')) ?: $this->incrementPatchVersion($fromVersion);
         $checksum = $inspection['checksum_sha256'];
-
         $backup = $this->createFullBackup($actorName, "Pre-Update Snapshot ({$fromVersion} → {$toVersion})");
 
         $stamp = now()->format('Ymd-His') . '-' . bin2hex(random_bytes(3));
@@ -464,12 +467,21 @@ class SystemUpdateService
         $rollbackDir = storage_path('app/update-rollback/' . $stamp);
         $flagPath = storage_path('framework/updating.flag');
 
-        mkdir($stagingDir, 0755, true);
-        mkdir($rollbackDir, 0755, true);
+        if (!mkdir($stagingDir, 0700, true) && !is_dir($stagingDir)) {
+            throw new RuntimeException('Unable to create update staging directory.');
+        }
+        if (!mkdir($rollbackDir, 0700, true) && !is_dir($rollbackDir)) {
+            $this->deleteDirectory($stagingDir);
+            throw new RuntimeException('Unable to create update rollback directory.');
+        }
+        @chmod($stagingDir, 0700);
+        @chmod($rollbackDir, 0700);
 
         $overwrittenFiles = [];
         $newlyCreatedFiles = [];
         $filesUpdatedCount = 0;
+        $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+        $migrationStarted = false;
 
         try {
             $zip = new ZipArchive();
@@ -477,33 +489,44 @@ class SystemUpdateService
                 throw new RuntimeException('Unable to re-open update ZIP package.');
             }
             try {
-                $zip->extractTo($stagingDir);
+                if (!$zip->extractTo($stagingDir)) {
+                    throw new RuntimeException('Unable to extract update archive into the private staging directory.');
+                }
             } finally {
                 $zip->close();
             }
+            $this->assertSafeExtractedTree($stagingDir);
 
-            file_put_contents($flagPath, "Updating {$fromVersion} -> {$toVersion} at " . now()->toIso8601String());
+            if (file_put_contents($flagPath, "Updating {$fromVersion} -> {$toVersion} at " . now()->toIso8601String(), LOCK_EX) === false) {
+                throw new RuntimeException('Unable to enable the maintenance update lock.');
+            }
 
             $prefix = $inspection['strip_prefix'];
-            $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
-
             foreach ($inspection['updatable_files'] as $relPath) {
-                $source = $stagingDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $prefix . $relPath);
+                $sourceRelative = $prefix . $relPath;
+                $source = $this->assertSafeDestinationPath($stagingDir, $sourceRelative);
                 if (!is_file($source)) {
                     continue;
                 }
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
+
+                $dest = $this->assertSafeDestinationPath($basePath, $relPath);
                 $destDir = dirname($dest);
-                if (!is_dir($destDir)) {
-                    mkdir($destDir, 0755, true);
+                if (!is_dir($destDir) && !mkdir($destDir, 0755, true) && !is_dir($destDir)) {
+                    throw new RuntimeException("Unable to create update destination directory for {$relPath}.");
                 }
+                $dest = $this->assertSafeDestinationPath($basePath, $relPath);
 
                 if (is_file($dest)) {
-                    $rbTarget = $rollbackDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                    if (!is_dir(dirname($rbTarget))) {
-                        mkdir(dirname($rbTarget), 0755, true);
+                    $rollbackRelative = $relPath;
+                    $rbTarget = $this->assertSafeDestinationPath($rollbackDir, $rollbackRelative);
+                    if (!is_dir(dirname($rbTarget)) && !mkdir(dirname($rbTarget), 0700, true) && !is_dir(dirname($rbTarget))) {
+                        throw new RuntimeException("Unable to create rollback directory for {$relPath}.");
                     }
-                    copy($dest, $rbTarget);
+                    $rbTarget = $this->assertSafeDestinationPath($rollbackDir, $rollbackRelative);
+                    if (!copy($dest, $rbTarget)) {
+                        throw new RuntimeException("Unable to preserve the original file before updating: {$relPath}");
+                    }
+                    @chmod($rbTarget, 0600);
                     $overwrittenFiles[] = $relPath;
                 } else {
                     $newlyCreatedFiles[] = $relPath;
@@ -526,7 +549,11 @@ class SystemUpdateService
                     $migrateArgs['--path'] = $migrationsDir;
                     $migrateArgs['--realpath'] = true;
                 }
-                Artisan::call('migrate', $migrateArgs);
+                $migrationStarted = true;
+                $migrationExitCode = Artisan::call('migrate', $migrateArgs);
+                if ($migrationExitCode !== 0) {
+                    throw new RuntimeException('One or more database migrations failed. The update package was not marked as applied.');
+                }
             }
 
             $ranAfter = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
@@ -557,26 +584,62 @@ class SystemUpdateService
                     Artisan::call('route:clear');
                     Artisan::call('config:clear');
                 } catch (\Throwable) {
-                    // Safe to ignore in CLI/test contexts
+                    // Safe to ignore in CLI/test contexts.
                 }
             }
 
             return $record;
         } catch (\Throwable $e) {
+            $rollbackWarnings = [];
+            $ranAfterFailure = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $newMigrations = array_values(array_diff($ranAfterFailure, $ranBefore));
+
+            if ($newMigrations !== []) {
+                try {
+                    $rollbackArgs = ['--step' => 1, '--force' => true];
+                    $migrationsDir = $basePath . DIRECTORY_SEPARATOR . 'database' . DIRECTORY_SEPARATOR . 'migrations';
+                    if ($targetBasePath !== null && is_dir($migrationsDir)) {
+                        $rollbackArgs['--path'] = $migrationsDir;
+                        $rollbackArgs['--realpath'] = true;
+                    }
+                    $rollbackExitCode = Artisan::call('migrate:rollback', $rollbackArgs);
+                    $remaining = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+                    if ($rollbackExitCode !== 0 || array_diff($remaining, $ranBefore) !== []) {
+                        throw new RuntimeException('Newly applied migrations remain after rollback.');
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = 'Automatic migration rollback failed: ' . $rollbackException->getMessage();
+                }
+            } elseif ($migrationStarted) {
+                $rollbackWarnings[] = 'The failed migration was not recorded as applied; inspect the database schema and use the pre-update backup if it changed partially.';
+            }
+
             foreach ($overwrittenFiles as $relPath) {
-                $rb = $rollbackDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                if (is_file($rb)) {
-                    @copy($rb, $dest);
+                try {
+                    $rb = $this->assertSafeDestinationPath($rollbackDir, $relPath);
+                    $dest = $this->assertSafeDestinationPath($basePath, $relPath);
+                    if (is_file($rb) && !copy($rb, $dest)) {
+                        $rollbackWarnings[] = "Unable to restore original file {$relPath}.";
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = "Unable to safely restore {$relPath}: " . $rollbackException->getMessage();
                 }
             }
             foreach ($newlyCreatedFiles as $relPath) {
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                if (is_file($dest)) {
-                    @unlink($dest);
+                try {
+                    $dest = $this->assertSafeDestinationPath($basePath, $relPath);
+                    if (is_file($dest) && !@unlink($dest)) {
+                        $rollbackWarnings[] = "Unable to remove newly created file {$relPath}.";
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = "Unable to safely remove {$relPath}: " . $rollbackException->getMessage();
                 }
             }
 
+            $notes = 'Code files rolled back after error: ' . $e->getMessage();
+            if ($rollbackWarnings !== []) {
+                $notes .= ' | ' . implode(' | ', $rollbackWarnings);
+            }
             SystemUpdate::create([
                 'from_version' => $fromVersion,
                 'to_version' => $toVersion,
@@ -586,12 +649,15 @@ class SystemUpdateService
                 'migrations_applied' => [],
                 'backup_snapshot_id' => $backup['snapshot']->id,
                 'backup_file_path' => $backup['file_path'],
-                'status' => 'rolled_back',
-                'notes' => 'Rolled back automatically after error: ' . $e->getMessage(),
+                'status' => $rollbackWarnings === [] ? 'rolled_back' : 'rollback_failed',
+                'notes' => $notes,
                 'applied_by' => $actorName,
                 'applied_at' => now(),
             ]);
 
+            if ($rollbackWarnings !== []) {
+                throw new RuntimeException($e->getMessage() . ' ' . implode(' ', $rollbackWarnings), 0, $e);
+            }
             throw $e;
         } finally {
             @unlink($flagPath);
