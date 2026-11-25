@@ -46,6 +46,7 @@ use App\Models\User;
 use App\Services\SystemUpdateService;
 use App\Support\AuditRecorder;
 use App\Support\BrandSettings;
+use App\Support\TeacherCourseAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -436,6 +437,12 @@ class PortalController extends Controller
             'is_free_preview' => 'nullable|boolean',
         ]);
 
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
+        if (!empty($data['batch_id'])) {
+            $batch = Batch::findOrFail($data['batch_id']);
+            if ((int) $batch->course_id !== (int) $data['course_id']) abort(403, 'Lesson batch must belong to the selected course.');
+            TeacherCourseAccess::assertCanManageBatch($request->user(), $batch);
+        }
         $orderIndex = Lesson::where('course_id', $data['course_id'])->count() + 1;
         Lesson::create([
             ...$data,
@@ -463,6 +470,14 @@ class PortalController extends Controller
             'is_free_preview' => 'nullable|boolean',
         ]);
 
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $lesson->course_id);
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
+        if ($lesson->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $lesson->batch);
+        if (!empty($data['batch_id'])) {
+            $batch = Batch::findOrFail($data['batch_id']);
+            if ((int) $batch->course_id !== (int) $data['course_id']) abort(403, 'Lesson batch must belong to the selected course.');
+            TeacherCourseAccess::assertCanManageBatch($request->user(), $batch);
+        }
         $lesson->update([
             ...$data,
             'is_free_preview' => $request->boolean('is_free_preview'),
@@ -472,6 +487,8 @@ class PortalController extends Controller
 
     public function updateLessonLiveStatus(Request $request, Lesson $lesson)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $lesson->course_id);
+        if ($lesson->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $lesson->batch);
         $data = $request->validate(['live_status' => 'required|in:scheduled,live_now,ended']);
         $lesson->update([
             'lesson_type' => 'live',
@@ -480,8 +497,10 @@ class PortalController extends Controller
         return back()->with('status', "Live class marked as {$data['live_status']}.");
     }
 
-    public function duplicateLesson(Lesson $lesson)
+    public function duplicateLesson(Request $request, Lesson $lesson)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $lesson->course_id);
+        if ($lesson->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $lesson->batch);
         $copy = $lesson->replicate();
         $copy->title = $lesson->title . ' (Copy)';
         $copy->order_index = Lesson::where('course_id', $lesson->course_id)->count() + 1;
@@ -489,8 +508,10 @@ class PortalController extends Controller
         return back()->with('status', 'Lecture duplicated.');
     }
 
-    public function deleteLesson(Lesson $lesson)
+    public function deleteLesson(Request $request, Lesson $lesson)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $lesson->course_id);
+        if ($lesson->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $lesson->batch);
         $lesson->delete();
         return back()->with('status', 'Lesson deleted.');
     }
@@ -498,6 +519,7 @@ class PortalController extends Controller
     public function storeExam(Request $request)
     {
         $data = $request->validate([
+            'course_id' => 'nullable|exists:courses,id',
             'title' => 'required|string',
             'category' => 'required|string',
             'prompt' => 'required|string',
@@ -505,7 +527,12 @@ class PortalController extends Controller
             'correct_index' => 'required|integer|min:0|max:3',
         ]);
 
+        if ($request->user()->role === 'teacher' && empty($data['course_id'])) {
+            abort(403, 'Teachers must create exams inside an assigned course.');
+        }
+        if (!empty($data['course_id'])) TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
         $exam = Exam::create([
+            'course_id' => $data['course_id'] ?? null,
             'title' => $data['title'],
             'category' => $data['category'],
             'teacher_id' => $request->user()->id,
@@ -1172,12 +1199,18 @@ class PortalController extends Controller
     public function buildExamFromBank(Request $request)
     {
         $data = $request->validate([
+            'course_id' => 'nullable|exists:courses,id',
             'title' => 'required|string|max:180',
             'category' => 'required|string|max:100',
             'subject' => 'nullable|string',
             'count' => 'required|integer|min:1|max:50',
             'duration_minutes' => 'required|integer|min:5|max:180',
         ]);
+
+        if ($request->user()->role === 'teacher' && empty($data['course_id'])) {
+            abort(403, 'Teachers must build exams inside an assigned course.');
+        }
+        if (!empty($data['course_id'])) TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
 
         $pool = QuestionBankItem::when(!empty($data['subject']), fn ($q) => $q->where('subject', $data['subject']))
             ->inRandomOrder()
@@ -1189,6 +1222,7 @@ class PortalController extends Controller
         }
 
         $exam = Exam::create([
+            'course_id' => $data['course_id'] ?? null,
             'title' => $data['title'],
             'category' => $data['category'],
             'duration_minutes' => $data['duration_minutes'],
