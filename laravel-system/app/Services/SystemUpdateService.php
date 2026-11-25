@@ -640,7 +640,9 @@ class SystemUpdateService
             'storage',
             'bootstrap/cache',
             'public/uploads',
+            'public/storage',
             'vendor',
+            'node_modules',
         ]);
 
         foreach ($protected as $prefix) {
@@ -651,6 +653,78 @@ class SystemUpdateService
         }
 
         return false;
+    }
+
+
+    private function assertSafeExtractedTree(string $directory): void
+    {
+        $root = realpath($directory);
+        if ($root === false) {
+            throw new RuntimeException('Update staging directory could not be resolved.');
+        }
+
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($iterator as $item) {
+            if ($item->isLink()) {
+                throw new RuntimeException('Symbolic links are not allowed in extracted update packages.');
+            }
+            $realPath = $item->getRealPath();
+            if ($realPath === false || ($realPath !== $root && !str_starts_with($realPath, $root . DIRECTORY_SEPARATOR))) {
+                throw new RuntimeException('An extracted update path resolves outside its staging directory.');
+            }
+        }
+    }
+
+    private function assertSafeDestinationPath(string $basePath, string $relativePath): string
+    {
+        $root = realpath($basePath);
+        if ($root === false) {
+            throw new RuntimeException('Update target directory could not be resolved.');
+        }
+
+        $normalized = str_replace('\\', '/', $relativePath);
+        if ($normalized === '' || str_starts_with($normalized, '/') || preg_match('/^[A-Za-z]:/', $normalized)) {
+            throw new RuntimeException('Unsafe update destination path.');
+        }
+
+        $segments = explode('/', $normalized);
+        foreach ($segments as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                throw new RuntimeException('Unsafe update destination path.');
+            }
+        }
+
+        $fileName = array_pop($segments);
+        $cursor = $root;
+        foreach ($segments as $segment) {
+            $cursor .= DIRECTORY_SEPARATOR . $segment;
+            if (is_link($cursor)) {
+                throw new RuntimeException("Update destination contains a symbolic-link directory: {$segment}");
+            }
+            if (file_exists($cursor) && !is_dir($cursor)) {
+                throw new RuntimeException('Update destination parent is not a directory.');
+            }
+            if (is_dir($cursor)) {
+                $realDirectory = realpath($cursor);
+                if ($realDirectory === false || ($realDirectory !== $root && !str_starts_with($realDirectory, $root . DIRECTORY_SEPARATOR))) {
+                    throw new RuntimeException('Update destination resolves outside the application directory.');
+                }
+            }
+        }
+
+        $destination = $cursor . DIRECTORY_SEPARATOR . $fileName;
+        if (is_link($destination)) {
+            throw new RuntimeException('Update destination file is a symbolic link.');
+        }
+        if (file_exists($destination) && !is_file($destination)) {
+            throw new RuntimeException('Update destination is not a regular file.');
+        }
+
+        return $destination;
     }
 
     private function detectWrapperPrefix(array $entries): string
