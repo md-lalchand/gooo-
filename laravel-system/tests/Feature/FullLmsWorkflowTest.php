@@ -205,7 +205,7 @@ class FullLmsWorkflowTest extends TestCase
         $webhookSig = hash_hmac('sha256', (string) $webhookPayload, $webhookSecret);
         $this->call(
             'POST',
-            '/payments/webhook/online',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
