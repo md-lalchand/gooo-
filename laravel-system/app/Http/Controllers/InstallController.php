@@ -73,7 +73,7 @@ class InstallController extends Controller
         $mysqlSslCa = trim((string) ($data['db_ssl_ca'] ?? ''));
         $isHttps = str_starts_with(strtolower(trim($data['app_url'])), 'https://');
 
-        if ($driver === 'pgsql' && in_array($sslMode, ['verify-ca', 'verify-full'], true)) {
+        if ($driver === 'mysql' && !extension_loaded('pdo_mysql')) {\n            return back()->withInput()->withErrors(['db' => 'The PDO MySQL extension is required for this database driver.']);\n        }\n        if ($driver === 'pgsql' && !extension_loaded('pdo_pgsql')) {\n            return back()->withInput()->withErrors(['db' => 'The PDO PostgreSQL extension is required for this database driver.']);\n        }\n        if ($driver === 'pgsql' && in_array($sslMode, ['verify-ca', 'verify-full'], true)) {
             if ($sslRootCert === '' || !is_file($sslRootCert) || !is_readable($sslRootCert)) {
                 return back()->withInput()->withErrors(['db_sslrootcert' => 'A readable PostgreSQL CA certificate file is required for verify-ca / verify-full mode.']);
             }
