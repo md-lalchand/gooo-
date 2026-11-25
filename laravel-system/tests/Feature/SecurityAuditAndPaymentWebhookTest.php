@@ -87,6 +87,85 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         });
     }
 
+
+    public function test_password_recovery_rejects_weak_passwords_and_consumes_a_valid_token_once(): void
+    {
+        Notification::fake();
+
+        $user = User::create([
+            'name' => 'Strong Recovery Student',
+            'email' => 'strong-recovery@student.example',
+            'role' => 'student',
+            'status' => 'active',
+            'password' => Hash::make('ExistingPass123!'),
+            'remember_token' => 'old-remember-token',
+        ]);
+
+        $this->post(route('recover.request'), [
+            'email' => $user->email,
+            'expected_role' => 'student',
+        ])->assertRedirect();
+
+        $notification = Notification::sent($user, PasswordRecoveryToken::class)->first();
+        $this->assertNotNull($notification);
+        $tokenProperty = new \ReflectionProperty($notification, 'token');
+        $rawToken = $tokenProperty->getValue($notification);
+
+        $this->post(route('recover.confirm'), [
+            'email' => $user->email,
+            'token' => $rawToken,
+            'password' => 'weak',
+            'expected_role' => 'student',
+        ])->assertSessionHasErrors('password');
+
+        $this->assertNotEmpty($user->fresh()->password_reset_token_hash);
+
+        $this->post(route('recover.confirm'), [
+            'email' => $user->email,
+            'token' => $rawToken,
+            'password' => 'StrongReset123!',
+            'expected_role' => 'student',
+        ])->assertRedirect(route('login', ['role' => 'student']));
+
+        $user->refresh();
+        $this->assertTrue(Hash::check('StrongReset123!', $user->password));
+        $this->assertNull($user->password_reset_token_hash);
+        $this->assertNull($user->password_reset_expires_at);
+        $this->assertNotSame('old-remember-token', $user->remember_token);
+
+        $this->post(route('recover.confirm'), [
+            'email' => $user->email,
+            'token' => $rawToken,
+            'password' => 'AnotherStrong123!',
+            'expected_role' => 'student',
+        ])->assertSessionHasErrors('token');
+
+        $this->assertTrue(Hash::check('StrongReset123!', $user->fresh()->password));
+    }
+
+    public function test_password_recovery_rejects_expired_tokens(): void
+    {
+        $token = 'A'.str_repeat('B', 63);
+        $user = User::create([
+            'name' => 'Expired Recovery Student',
+            'email' => 'expired-recovery@student.example',
+            'role' => 'student',
+            'status' => 'active',
+            'password' => Hash::make('ExistingPass123!'),
+            'password_reset_token_hash' => hash('sha256', $token),
+            'password_reset_expires_at' => now()->subMinute(),
+        ]);
+
+        $this->post(route('recover.confirm'), [
+            'email' => $user->email,
+            'token' => $token,
+            'password' => 'StrongReset123!',
+            'expected_role' => 'student',
+        ])->assertSessionHasErrors('token');
+
+        $this->assertTrue(Hash::check('ExistingPass123!', $user->fresh()->password));
+    }
+
     public function test_guardian_registration_requires_student_phone_or_hmac_linking_code(): void
     {
         $branch = Branch::create([
