@@ -75,8 +75,10 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           PORT: '3100'
         run: |
-          npm start > /tmp/node-api.log 2>&1 &
-          echo $! > /tmp/node-api.pid
+          npm start > /tmp/node-api-3100.log 2>&1 &
+          echo $! > /tmp/node-api-3100.pid
+          PORT=3101 npm start > /tmp/node-api-3101.log 2>&1 &
+          echo $! > /tmp/node-api-3101.pid
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:3100/api/public/bootstrap > /tmp/node-bootstrap.json; then
               break
@@ -84,7 +86,15 @@ jobs:
             sleep 2
           done
           test -s /tmp/node-bootstrap.json
-          kill "$(cat /tmp/node-api.pid)" || true
+          # Both processes must consume the same Redis guest-IP counter.
+          last_status=0
+          for attempt in $(seq 1 121); do
+            port=3100
+            if [ $((attempt % 2)) -eq 0 ]; then port=3101; fi
+            last_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/api/public/bootstrap")
+          done
+          test "$last_status" = "429"
+          kill "$(cat /tmp/node-api-3100.pid)" "$(cat /tmp/node-api-3101.pid)" || true
 
       - uses: shivammathur/setup-php@v2
         with:
