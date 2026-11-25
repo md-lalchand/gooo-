@@ -6,7 +6,6 @@ use App\Models\BackupSnapshot;
 use App\Models\SystemUpdate;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -196,6 +195,80 @@ class SystemUpdateService
         ];
     }
 
+    /**
+     * Backup encryption is deliberately independent from APP_KEY so a restored
+     * .env can contain a different APP_KEY without making the backup undecryptable.
+     * Keep BACKUP_ENCRYPTION_KEY in an external secret manager and escrow it separately.
+     */
+    private function resolveBackupEncryptionKey(): string
+    {
+        $configured = trim((string) env('BACKUP_ENCRYPTION_KEY', ''));
+        if (preg_match('/^[a-f0-9]{64}$/i', $configured)) {
+            $key = hex2bin($configured);
+            if (is_string($key) && strlen($key) === 32) {
+                return $key;
+            }
+        }
+
+        $decoded = base64_decode($configured, true);
+        if (is_string($decoded) && strlen($decoded) === 32) {
+            return $decoded;
+        }
+
+        throw new RuntimeException(
+            'BACKUP_ENCRYPTION_KEY must be a separately escrowed 32-byte key (64 hex or base64). Portable backup is disabled until it is configured.'
+        );
+    }
+
+    private function encryptBackupSecret(string $plaintext): string
+    {
+        $nonce = random_bytes(12);
+        $tag = '';
+        $ciphertext = openssl_encrypt(
+            $plaintext,
+            'aes-256-gcm',
+            $this->resolveBackupEncryptionKey(),
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            'lms-portable-backup-v1',
+            16
+        );
+        if (!is_string($ciphertext) || strlen($tag) !== 16) {
+            throw new RuntimeException('Unable to encrypt the environment backup.');
+        }
+
+        return 'v1:' . base64_encode($nonce . $tag . $ciphertext);
+    }
+
+    private function decryptBackupSecret(string $envelope): string
+    {
+        if (!str_starts_with($envelope, 'v1:')) {
+            throw new RuntimeException('Unsupported encrypted environment backup format.');
+        }
+        $payload = base64_decode(substr($envelope, 3), true);
+        if (!is_string($payload) || strlen($payload) < 28) {
+            throw new RuntimeException('Encrypted environment backup is malformed.');
+        }
+
+        $nonce = substr($payload, 0, 12);
+        $tag = substr($payload, 12, 16);
+        $ciphertext = substr($payload, 28);
+        $plaintext = openssl_decrypt(
+            $ciphertext,
+            'aes-256-gcm',
+            $this->resolveBackupEncryptionKey(),
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            'lms-portable-backup-v1'
+        );
+        if (!is_string($plaintext)) {
+            throw new RuntimeException('Environment backup authentication failed. Check BACKUP_ENCRYPTION_KEY.');
+        }
+        return $plaintext;
+    }
+
     private function createPortableBackupArchive(BackupSnapshot $snapshot, string $databaseJson): string
     {
         if (!class_exists(ZipArchive::class)) {
@@ -225,7 +298,7 @@ class SystemUpdateService
             @unlink($temporaryPath);
             throw new RuntimeException('Unable to read the application environment file.');
         }
-        $entries['environment/.env.encrypted'] = Crypt::encryptString($envContents);
+        $entries['environment/.env.encrypted'] = $this->encryptBackupSecret($envContents);
 
         foreach ([
             'storage-app-public' => storage_path('app/public'),
@@ -461,7 +534,7 @@ class SystemUpdateService
             throw new RuntimeException('Portable archive does not match the verified database snapshot.');
         }
         try {
-            $environmentContents = Crypt::decryptString($verifiedEntries['environment/.env.encrypted']);
+            $environmentContents = $this->decryptBackupSecret($verifiedEntries['environment/.env.encrypted']);
         } catch (\Throwable $exception) {
             $zip->close();
             throw new RuntimeException('Encrypted environment backup cannot be decrypted with the current application key.', 0, $exception);
