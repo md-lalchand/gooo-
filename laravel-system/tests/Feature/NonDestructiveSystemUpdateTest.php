@@ -527,7 +527,8 @@ PHP
         $this->assertIsString($encryptedEnvironment);
         $this->assertStringNotContainsString('APP_NAME=', $encryptedEnvironment);
         $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
-        $this->assertSame('lms-portable-backup-v1', $manifest['format'] ?? null);
+        $this->assertSame('lms-portable-backup-v2', $manifest['format'] ?? null);
+        $this->assertArrayHasKey('hmac_sha256', $manifest);
         $this->assertArrayHasKey('uploads/storage-app-public/.backup-root', $manifest['entries'] ?? []);
         $zip->close();
 
@@ -547,6 +548,56 @@ PHP
         $this->cleanupFiles[] = $restored['environment_restore_path'];
         $this->assertDatabaseHas('users', ['email' => 'snapshot-student@example.test']);
         $this->assertDatabaseMissing('users', ['email' => 'after-snapshot@example.test']);
+    }
+
+    public function test_portable_backup_manifest_authentication_rejects_rewritten_entry_checksums(): void
+    {
+        $service = app(SystemUpdateService::class);
+        $snapshot = $service->createFullBackup('Backup Admin', 'Authenticated manifest test')['snapshot'];
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        $this->cleanupFiles[] = $archivePath;
+
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($archivePath, 0));
+        $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
+        $this->assertSame('lms-portable-backup-v2', $manifest['format'] ?? null);
+        $this->assertArrayHasKey('hmac_sha256', $manifest);
+        $manifest['entries']['database.json'] = str_repeat('0', 64);
+        $this->assertTrue($zip->deleteName('manifest.json'));
+        $this->assertTrue($zip->addFromString('manifest.json', json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)));
+        $this->assertTrue($zip->close());
+
+        try {
+            $service->verifyPortableBackupArchive($snapshot);
+            $this->fail('A rewritten portable manifest must fail HMAC verification.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('authentication failed', strtolower($exception->getMessage()));
+        }
+    }
+
+    public function test_unsigned_legacy_portable_manifests_are_blocked_by_default(): void
+    {
+        config(['backup.allow_unsigned_legacy' => false]);
+        $service = app(SystemUpdateService::class);
+        $snapshot = $service->createFullBackup('Backup Admin', 'Legacy manifest test')['snapshot'];
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        $this->cleanupFiles[] = $archivePath;
+
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($archivePath, 0));
+        $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
+        $manifest['format'] = 'lms-portable-backup-v1';
+        unset($manifest['hmac_sha256']);
+        $this->assertTrue($zip->deleteName('manifest.json'));
+        $this->assertTrue($zip->addFromString('manifest.json', json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)));
+        $this->assertTrue($zip->close());
+
+        try {
+            $service->verifyPortableBackupArchive($snapshot);
+            $this->fail('Unsigned legacy archives must be blocked by default.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('unsigned', strtolower($exception->getMessage()));
+        }
     }
 
     public function test_portable_backup_captures_plugin_tables_not_in_the_builtin_allowlist(): void

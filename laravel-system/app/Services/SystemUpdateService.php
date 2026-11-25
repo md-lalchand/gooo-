@@ -393,12 +393,14 @@ class SystemUpdateService
                 throw new RuntimeException("Unable to add backup entry: {$name}");
             }
         }
-        $manifest = json_encode([
-            'format' => 'lms-portable-backup-v1',
+        $manifestData = [
+            'format' => 'lms-portable-backup-v2',
             'snapshot_id' => $snapshot->id,
             'created_at' => now()->toIso8601String(),
             'entries' => $manifestEntries,
-        ], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        ];
+        $manifestData['hmac_sha256'] = $this->portableManifestSignature($manifestData);
+        $manifest = json_encode($manifestData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         if (!is_string($manifest) || !$zip->addFromString('manifest.json', $manifest) || !$zip->close()) {
             @unlink($temporaryPath);
             throw new RuntimeException('Unable to finalize portable backup archive.');
@@ -494,6 +496,66 @@ class SystemUpdateService
         ];
     }
 
+    /**
+     * Sign the portable archive manifest with the separately escrowed backup key.
+     * The signature covers the format, snapshot identity, timestamp, and every
+     * entry checksum; an attacker cannot replace an upload and rewrite its hash.
+     */
+    private function portableManifestSignature(array $manifest): string
+    {
+        unset($manifest['hmac_sha256']);
+        $canonical = json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($canonical)) {
+            throw new RuntimeException('Unable to encode portable backup manifest for authentication.');
+        }
+
+        // Derive a domain-separated authentication key; do not reuse the raw
+        // AES-GCM encryption key directly for HMAC.
+        $manifestKey = hash_hkdf(
+            'sha256',
+            $this->resolveBackupEncryptionKey(),
+            32,
+            'lms-portable-backup-manifest-v2'
+        );
+
+        return hash_hmac('sha256', $canonical, $manifestKey);
+    }
+
+    private function readAndVerifyPortableBackupManifest(ZipArchive $zip, BackupSnapshot $snapshot): array
+    {
+        $manifestJson = $zip->getFromName('manifest.json');
+        $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
+        if (!is_array($manifest)
+            || ($manifest['format'] ?? null) !== 'lms-portable-backup-v2'
+            || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+            || !is_array($manifest['entries'] ?? null)
+            || !is_string($manifest['hmac_sha256'] ?? null)
+            || !preg_match('/^[a-f0-9]{64}$/i', $manifest['hmac_sha256'])
+        ) {
+            if (($manifest['format'] ?? null) === 'lms-portable-backup-v1'
+                && config('backup.allow_unsigned_legacy', false) === true
+            ) {
+                // Explicit emergency compatibility switch; legacy manifests cannot
+                // authenticate upload contents and must remain disabled by default.
+                if ((int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+                    || !is_array($manifest['entries'] ?? null)
+                ) {
+                    throw new RuntimeException('Legacy portable backup manifest is invalid.');
+                }
+                return $manifest;
+            }
+            throw new RuntimeException('Portable backup manifest is unsigned, invalid, or uses an unsupported format. Create a new authenticated backup before restoring.');
+        }
+
+        $providedSignature = $manifest['hmac_sha256'];
+        $expectedSignature = $this->portableManifestSignature($manifest);
+        if (!hash_equals($expectedSignature, $providedSignature)) {
+            throw new RuntimeException('Portable backup manifest authentication failed. Restore/download aborted.');
+        }
+
+        return $manifest;
+    }
+
     public function verifyPortableBackupArchive(BackupSnapshot $snapshot): void
     {
         $this->verifyBackupSnapshot($snapshot);
@@ -506,15 +568,7 @@ class SystemUpdateService
             throw new RuntimeException('Portable backup archive cannot be opened.');
         }
         try {
-            $manifestJson = $zip->getFromName('manifest.json');
-            $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
-            if (!is_array($manifest)
-                || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
-                || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
-                || !is_array($manifest['entries'] ?? null)
-            ) {
-                throw new RuntimeException('Portable backup manifest is invalid.');
-            }
+            $manifest = $this->readAndVerifyPortableBackupManifest($zip, $snapshot);
             foreach ($manifest['entries'] as $name => $expectedHash) {
                 if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
                     || str_contains($name, '\\') || !is_string($expectedHash)
@@ -543,15 +597,11 @@ class SystemUpdateService
         if ($zip->open($archivePath) !== true) {
             throw new RuntimeException('Unable to open portable backup archive.');
         }
-        $manifestJson = $zip->getFromName('manifest.json');
-        $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
-        if (!is_array($manifest)
-            || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
-            || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
-            || !is_array($manifest['entries'] ?? null)
-        ) {
+        try {
+            $manifest = $this->readAndVerifyPortableBackupManifest($zip, $snapshot);
+        } catch (Throwable $exception) {
             $zip->close();
-            throw new RuntimeException('Portable backup manifest is invalid.');
+            throw $exception;
         }
 
         $verifiedEntries = [];
