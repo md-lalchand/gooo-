@@ -6,6 +6,7 @@ use App\Models\BackupSnapshot;
 use App\Models\SystemUpdate;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -177,13 +178,128 @@ class SystemUpdateService
             throw $exception;
         }
 
+        try {
+            $archivePath = $this->createPortableBackupArchive($snapshot, $json);
+        } catch (\Throwable $exception) {
+            $snapshot->delete();
+            @unlink($fullPath);
+            throw $exception;
+        }
+
         return [
             'snapshot' => $snapshot,
             'file_path' => 'storage/app/backups/' . $fileName,
+            'archive_path' => $archivePath,
             'file_name' => $fileName,
             'checksum' => $checksum,
             'table_counts' => $counts,
         ];
+    }
+
+    private function createPortableBackupArchive(BackupSnapshot $snapshot, string $databaseJson): string
+    {
+        if (!class_exists(ZipArchive::class)) {
+            throw new RuntimeException('PHP zip extension is required for portable backups.');
+        }
+        $backupDir = storage_path('app/backups');
+        if (!is_dir($backupDir) && !mkdir($backupDir, 0700, true) && !is_dir($backupDir)) {
+            throw new RuntimeException('Unable to create the private backup directory.');
+        }
+        $archivePath = $backupDir . DIRECTORY_SEPARATOR . 'backup-' . $snapshot->id . '.zip';
+        $temporaryPath = $archivePath . '.tmp';
+        $zip = new ZipArchive();
+        if ($zip->open($temporaryPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException('Unable to create portable backup archive.');
+        }
+
+        $entries = ['database.json' => $databaseJson];
+        $envPath = base_path('.env');
+        if (!is_file($envPath) || !is_readable($envPath)) {
+            $zip->close();
+            @unlink($temporaryPath);
+            throw new RuntimeException('The application environment file is missing or unreadable; portable backup aborted.');
+        }
+        $envContents = file_get_contents($envPath);
+        if (!is_string($envContents)) {
+            $zip->close();
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to read the application environment file.');
+        }
+        $entries['environment/.env.encrypted'] = Crypt::encryptString($envContents);
+
+        foreach ([
+            'storage-app-public' => storage_path('app/public'),
+            'public-uploads' => public_path('uploads'),
+            'data-uploads' => base_path('data/uploads'),
+        ] as $rootName => $rootPath) {
+            $entries['uploads/' . $rootName . '/.backup-root'] = 'root';
+            if (!is_dir($rootPath)) {
+                continue;
+            }
+            if (is_link($rootPath)) {
+                $zip->close();
+                @unlink($temporaryPath);
+                throw new RuntimeException("Refusing to back up a symlinked upload directory: {$rootName}");
+            }
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($rootPath, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($iterator as $item) {
+                if (!$item->isFile()) {
+                    continue;
+                }
+                if ($item->isLink()) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException("Refusing to back up a symlinked upload file: {$rootName}");
+                }
+                $relative = str_replace(DIRECTORY_SEPARATOR, '/', substr($item->getPathname(), strlen($rootPath) + 1));
+                if ($relative === '' || str_contains($relative, '../')) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException('Unsafe upload path encountered during backup.');
+                }
+                $content = file_get_contents($item->getPathname());
+                if (!is_string($content)) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException("Unable to read upload file: {$relative}");
+                }
+                $entries['uploads/' . $rootName . '/' . $relative] = $content;
+            }
+        }
+
+        $manifestEntries = [];
+        foreach ($entries as $name => $content) {
+            $manifestEntries[$name] = hash('sha256', $content);
+            if (!$zip->addFromString($name, $content)) {
+                $zip->close();
+                @unlink($temporaryPath);
+                throw new RuntimeException("Unable to add backup entry: {$name}");
+            }
+        }
+        $manifest = json_encode([
+            'format' => 'lms-portable-backup-v1',
+            'snapshot_id' => $snapshot->id,
+            'created_at' => now()->toIso8601String(),
+            'entries' => $manifestEntries,
+        ], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($manifest) || !$zip->addFromString('manifest.json', $manifest) || !$zip->close()) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to finalize portable backup archive.');
+        }
+
+        $archiveHash = hash_file('sha256', $temporaryPath);
+        if (!is_string($archiveHash) || !rename($temporaryPath, $archivePath)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to verify and finalize portable backup archive.');
+        }
+        @chmod($archivePath, 0600);
+        if (!hash_equals($archiveHash, (string) hash_file('sha256', $archivePath))) {
+            @unlink($archivePath);
+            throw new RuntimeException('Portable backup archive checksum verification failed.');
+        }
+        return $archivePath;
     }
 
     public function verifyBackupSnapshot(BackupSnapshot $snapshot): array
