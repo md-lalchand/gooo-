@@ -509,7 +509,16 @@ class SystemUpdateService
             throw new RuntimeException('Unable to encode portable backup manifest for authentication.');
         }
 
-        return hash_hmac('sha256', $canonical, $this->resolveBackupEncryptionKey());
+        // Derive a domain-separated authentication key; do not reuse the raw
+        // AES-GCM encryption key directly for HMAC.
+        $manifestKey = hash_hkdf(
+            'sha256',
+            $this->resolveBackupEncryptionKey(),
+            32,
+            'lms-portable-backup-manifest-v2'
+        );
+
+        return hash_hmac('sha256', $canonical, $manifestKey);
     }
 
     private function readAndVerifyPortableBackupManifest(ZipArchive $zip, BackupSnapshot $snapshot): array
