@@ -265,55 +265,47 @@ class SystemUpdateService
 
     public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName): array
     {
-        $computed = hash('sha256', (string) $snapshot->payload_json);
-        if (!hash_equals($snapshot->checksum_sha256, $computed)) {
-            throw new RuntimeException('Backup SHA-256 verification failed. Restore aborted to protect live records.');
-        }
+        $verified = $this->verifyBackupSnapshot($snapshot);
+        $tablesData = $verified['tables'];
 
-        $decoded = json_decode((string) $snapshot->payload_json, true);
-        if (!is_array($decoded) || !isset($decoded['tables']) || !is_array($decoded['tables'])) {
-            throw new RuntimeException('Invalid backup snapshot format.');
-        }
-
+        // Preserve the current live state before any destructive restore work.
         $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
 
         $restoredCounts = [];
-        $tablesData = $decoded['tables'];
-
         DB::transaction(function () use ($tablesData, &$restoredCounts) {
             Schema::disableForeignKeyConstraints();
             try {
+                // Clear every currently supported business table. Tables absent
+                // from an older snapshot correctly return to an empty state.
                 foreach (array_reverse(self::BUSINESS_TABLES) as $table) {
-                    if (array_key_exists($table, $tablesData) && Schema::hasTable($table)) {
+                    if (Schema::hasTable($table)) {
                         DB::table($table)->delete();
                     }
                 }
 
                 foreach (self::BUSINESS_TABLES as $table) {
-                    if (!array_key_exists($table, $tablesData) || !Schema::hasTable($table)) {
+                    if (!Schema::hasTable($table)) {
                         continue;
                     }
-                    $rows = $tablesData[$table];
-                    if (empty($rows) || !is_array($rows)) {
+
+                    $rows = $tablesData[$table] ?? [];
+                    if ($rows === []) {
                         $restoredCounts[$table] = 0;
                         continue;
                     }
-                    $validCols = array_flip(Schema::getColumnListing($table));
-                    $filteredRows = array_map(
-                        static fn (array $row) => array_intersect_key($row, $validCols),
-                        $rows
-                    );
-                    foreach (array_chunk($filteredRows, 100) as $chunk) {
+
+                    foreach (array_chunk($rows, 100) as $chunk) {
                         DB::table($table)->insert($chunk);
                     }
-                    $restoredCounts[$table] = count($filteredRows);
-                    if (DB::getDriverName() === 'pgsql' && array_key_exists('id', $validCols)) {
+                    $restoredCounts[$table] = count($rows);
+
+                    if (DB::getDriverName() === 'pgsql' && Schema::hasColumn($table, 'id')) {
                         try {
                             DB::statement(
                                 "SELECT setval(pg_get_serial_sequence('{$table}', 'id'), COALESCE((SELECT MAX(id) FROM {$table}), 1))"
                             );
                         } catch (\Throwable) {
-                            // Ignore tables without serial sequences
+                            // Ignore tables without serial sequences.
                         }
                     }
                 }
