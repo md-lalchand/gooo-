@@ -10,6 +10,7 @@ use App\Models\Branch;
 use App\Models\Course;
 use App\Models\Enrollment;
 use App\Models\FeeInvoice;
+use App\Models\Lesson;
 use App\Models\Order;
 use App\Models\PayrollRecord;
 use App\Models\StudentAdmission;
@@ -237,6 +238,55 @@ class BranchTenantIsolationTest extends TestCase
         $this->assertSame([], $response->json('conflicts'));
     }
 
+
+    public function test_branch_and_teacher_portals_only_include_their_assigned_course_and_batch_data(): void
+    {
+        $branchA = $this->makeBranch('North Learning Branch', 'NLB');
+        $branchB = $this->makeBranch('South Learning Branch', 'SLB');
+        $branchUser = $this->makeUser('branch', $branchA->id, 'north.portal@example.test');
+        $teacherA = $this->makeUser('teacher', $branchA->id, 'north.teacher@example.test');
+        $teacherB = $this->makeUser('teacher', $branchB->id, 'south.teacher@example.test');
+        $courseA = $this->makeCourse('North Branch Curriculum');
+        $courseB = $this->makeCourse('South Branch Curriculum');
+        $batchA = $this->makeBatch($courseA, $branchA, 'NORTH-PORTAL-01');
+        $batchB = $this->makeBatch($courseB, $branchB, 'SOUTH-PORTAL-01');
+        $batchA->update(['main_teacher_id' => $teacherA->id]);
+        $batchB->update(['main_teacher_id' => $teacherB->id]);
+
+        Lesson::create([
+            'course_id' => $courseA->id,
+            'batch_id' => $batchA->id,
+            'lesson_type' => 'video',
+            'title' => 'North Private Lesson',
+            'duration' => '30 min',
+            'order_index' => 1,
+        ]);
+        Lesson::create([
+            'course_id' => $courseB->id,
+            'batch_id' => $batchB->id,
+            'lesson_type' => 'video',
+            'title' => 'South Private Lesson',
+            'duration' => '30 min',
+            'order_index' => 1,
+        ]);
+
+        $this->actingAs($branchUser)
+            ->get(route('portal.index'))
+            ->assertOk()
+            ->assertSee('North Branch Curriculum')
+            ->assertDontSee('South Branch Curriculum')
+            ->assertSee('North Private Lesson')
+            ->assertDontSee('South Private Lesson');
+
+        $this->actingAs($teacherA)
+            ->get(route('portal.index'))
+            ->assertOk()
+            ->assertSee('North Branch Curriculum')
+            ->assertDontSee('South Branch Curriculum')
+            ->assertSee('North Private Lesson')
+            ->assertDontSee('South Private Lesson');
+    }
+
     public function test_branch_dashboard_activity_feed_is_scoped_to_its_own_branch(): void
     {
         $branchA = $this->makeBranch('Uptown Branch', 'UPT');
@@ -292,11 +342,12 @@ class BranchTenantIsolationTest extends TestCase
         ]);
     }
 
-    private function makeCourse(): Course
+    private function makeCourse(?string $title = null): Course
     {
+        $title ??= 'Tenant Isolation Course';
         return Course::create([
             'slug' => 'course-' . bin2hex(random_bytes(3)),
-            'title' => 'Tenant Isolation Course',
+            'title' => $title,
             'subtitle' => 'Branch security test',
             'category' => 'Core Programs',
             'level_tag' => 'Level 1',
