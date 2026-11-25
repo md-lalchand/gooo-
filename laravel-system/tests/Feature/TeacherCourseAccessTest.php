@@ -303,8 +303,9 @@ class TeacherCourseAccessTest extends TestCase
             'completed_lesson_ids' => [$lessonB->id],
         ]);
 
-        $examA = Exam::create(['course_id' => $course->id, 'title' => 'Batch A Exam', 'category' => 'Test']);
-        $examB = Exam::create(['course_id' => $course->id, 'title' => 'Batch B Exam', 'category' => 'Test']);
+        $foreignCourse = $this->makeCourse('Foreign Exam Course');
+        $examA = Exam::create(['course_id' => $course->id, 'title' => 'Enrolled Course Exam', 'category' => 'Test']);
+        $examB = Exam::create(['course_id' => $foreignCourse->id, 'title' => 'Foreign Course Exam', 'category' => 'Test']);
         $globalExam = Exam::create(['title' => 'General Exam', 'category' => 'General']);
 
         $learn = $this->actingAs($student)->get(route('learn'))->assertOk();
