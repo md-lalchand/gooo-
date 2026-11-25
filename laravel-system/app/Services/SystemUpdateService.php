@@ -202,7 +202,7 @@ class SystemUpdateService
      */
     private function resolveBackupEncryptionKey(): string
     {
-        $configured = trim((string) env('BACKUP_ENCRYPTION_KEY', ''));
+        $configured = trim((string) config('backup.encryption_key', ''));
         if (preg_match('/^[a-f0-9]{64}$/i', $configured)) {
             $key = hex2bin($configured);
             if (is_string($key) && strlen($key) === 32) {
