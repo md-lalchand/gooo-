@@ -12,6 +12,8 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Notification;
+use App\Notifications\PasswordRecoveryToken;
 use Tests\TestCase;
 
 class SecurityAuditAndPaymentWebhookTest extends TestCase
@@ -63,7 +65,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $user->refresh();
         $this->assertNotEmpty($user->password_reset_token_hash);
         $this->assertNotNull($user->password_reset_expires_at);
-        Notification::assertSentTo($user, PasswordRecoveryToken::class, function (PasswordRecoveryToken $notification): bool {
+        Notification::assertSentTo($user, PasswordRecoveryToken::class, function (PasswordRecoveryToken $notification) use ($user): bool {
             $token = (new \\ReflectionClass($notification))->getProperty('token');
             $token->setAccessible(true);
             $rawToken = $token->getValue($notification);
