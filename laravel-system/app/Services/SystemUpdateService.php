@@ -105,7 +105,7 @@ class SystemUpdateService
         }
     }
 
-    public function createFullBackup(string $actorName, string $label = 'Verified Full Backup'): array
+    public function createFullBackup(string $actorName, string $label = 'Verified Full Database Backup'): array
     {
         $tables = [];
         $counts = [];
@@ -135,27 +135,47 @@ class SystemUpdateService
 
         $checksum = hash('sha256', $json);
         $backupDir = storage_path('app/backups');
-        if (!is_dir($backupDir)) {
-            mkdir($backupDir, 0755, true);
+        if (!is_dir($backupDir) && !mkdir($backupDir, 0700, true) && !is_dir($backupDir)) {
+            throw new RuntimeException('Unable to create the private backup directory.');
         }
+        @chmod($backupDir, 0700);
 
         $stamp = now()->format('Ymd-His') . '-' . bin2hex(random_bytes(3));
         $fileName = "backup-{$stamp}.json";
         $fullPath = $backupDir . DIRECTORY_SEPARATOR . $fileName;
-        file_put_contents($fullPath, $json);
+        $temporaryPath = $fullPath . '.tmp';
 
-        if (is_file(base_path('.env'))) {
-            @copy(base_path('.env'), $backupDir . DIRECTORY_SEPARATOR . "env-{$stamp}.bak");
+        $written = file_put_contents($temporaryPath, $json, LOCK_EX);
+        if ($written === false || $written !== strlen($json)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Failed to write the complete database backup file.');
         }
+        @chmod($temporaryPath, 0600);
 
-        $snapshot = BackupSnapshot::create([
-            'label' => $label,
-            'reason' => 'manual',
-            'checksum_sha256' => $checksum,
-            'verified' => true,
-            'created_by' => $actorName,
-            'payload_json' => $json,
-        ]);
+        $diskPayload = file_get_contents($temporaryPath);
+        if (!is_string($diskPayload) || !hash_equals($checksum, hash('sha256', $diskPayload))) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Database backup file verification failed.');
+        }
+        if (!@rename($temporaryPath, $fullPath)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to finalize the verified database backup file.');
+        }
+        @chmod($fullPath, 0600);
+
+        try {
+            $snapshot = BackupSnapshot::create([
+                'label' => $label,
+                'reason' => 'manual',
+                'checksum_sha256' => $checksum,
+                'verified' => true,
+                'created_by' => $actorName,
+                'payload_json' => $json,
+            ]);
+        } catch (\Throwable $exception) {
+            @unlink($fullPath);
+            throw $exception;
+        }
 
         return [
             'snapshot' => $snapshot,
@@ -163,6 +183,83 @@ class SystemUpdateService
             'file_name' => $fileName,
             'checksum' => $checksum,
             'table_counts' => $counts,
+        ];
+    }
+
+    public function verifyBackupSnapshot(BackupSnapshot $snapshot): array
+    {
+        if (!$snapshot->verified) {
+            throw new RuntimeException('This backup snapshot is not marked as verified. Restore/download is blocked.');
+        }
+
+        $json = (string) $snapshot->payload_json;
+        $computed = hash('sha256', $json);
+        if (!hash_equals((string) $snapshot->checksum_sha256, $computed)) {
+            throw new RuntimeException('Backup SHA-256 verification failed. Restore/download aborted.');
+        }
+
+        try {
+            $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $exception) {
+            throw new RuntimeException('Backup JSON payload is invalid.', 0, $exception);
+        }
+
+        if (!is_array($decoded)
+            || ($decoded['format'] ?? null) !== 'lms-full-backup-v1'
+            || !is_array($decoded['tables'] ?? null)
+            || !is_array($decoded['table_counts'] ?? null)
+        ) {
+            throw new RuntimeException('Unsupported or malformed backup snapshot format.');
+        }
+
+        $tablesData = $decoded['tables'];
+        $tableCounts = $decoded['table_counts'];
+        if (array_diff(array_keys($tablesData), array_keys($tableCounts))
+            || array_diff(array_keys($tableCounts), array_keys($tablesData))
+        ) {
+            throw new RuntimeException('Backup table-count manifest does not match the table payload.');
+        }
+
+        $allowedTables = array_flip(self::BUSINESS_TABLES);
+        $validatedTables = [];
+
+        foreach ($tablesData as $table => $rows) {
+            if (!isset($allowedTables[$table])) {
+                throw new RuntimeException("Backup contains an unsupported table: {$table}");
+            }
+            if (!is_array($rows) || !array_is_list($rows)) {
+                throw new RuntimeException("Backup rows for {$table} are malformed.");
+            }
+            if (!is_numeric($tableCounts[$table]) || (int) $tableCounts[$table] !== count($rows)) {
+                throw new RuntimeException("Backup row count verification failed for {$table}.");
+            }
+
+            if (!Schema::hasTable($table)) {
+                if (count($rows) > 0) {
+                    throw new RuntimeException("Cannot restore {$table}: the table is not present in the current schema.");
+                }
+                $validatedTables[$table] = [];
+                continue;
+            }
+
+            $validColumns = array_flip(Schema::getColumnListing($table));
+            $filteredRows = [];
+            foreach ($rows as $index => $row) {
+                if (!is_array($row) || array_is_list($row)) {
+                    throw new RuntimeException("Backup row {$index} for {$table} is malformed.");
+                }
+                $filtered = array_intersect_key($row, $validColumns);
+                if ($filtered === []) {
+                    throw new RuntimeException("Backup row {$index} for {$table} has no valid columns.");
+                }
+                $filteredRows[] = $filtered;
+            }
+            $validatedTables[$table] = $filteredRows;
+        }
+
+        return [
+            'payload' => $decoded,
+            'tables' => $validatedTables,
         ];
     }
 
