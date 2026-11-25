@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type { Request, Response } from 'express';
 import { getClientIp, setAuthSessionCookie, clearAuthSessionCookie } from './security';
 
 test('uses Express resolved client IP instead of an untrusted forwarded header', () => {
@@ -29,7 +30,7 @@ test('session cookies ignore spoofed X-Forwarded-Proto when Express does not tru
   } as unknown as Request;
   const response = {
     setHeader: (name: string, value: string) => { headers[name] = value; },
-  } as unknown as import('express').Response;
+  } as unknown as Response;
 
   setAuthSessionCookie(request, response, 'test-token');
   assert.match(headers['Set-Cookie'], /SameSite=Lax/);
