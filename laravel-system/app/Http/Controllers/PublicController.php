@@ -260,10 +260,10 @@ class PublicController extends Controller
             }
 
             $configuredId = strtolower(trim((string) ($configured['id'] ?? '')));
-            $configuredName = \\Illuminate\\Support\\Str::slug((string) ($configured['name'] ?? ''));
+            $configuredName = \Illuminate\Support\Str::slug((string) ($configured['name'] ?? ''));
 
             return ($configuredId !== '' && hash_equals($configuredId, $routeGateway))
-                || ($configuredName !== '' && hash_equals($configuredName, \\Illuminate\\Support\\Str::slug($routeGateway)));
+                || ($configuredName !== '' && hash_equals($configuredName, \Illuminate\Support\Str::slug($routeGateway)));
         });
 
         if (!$matchedGateway) {
