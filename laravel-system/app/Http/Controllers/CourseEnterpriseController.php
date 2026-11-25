@@ -114,10 +114,11 @@ class CourseEnterpriseController extends Controller
         if ($user->role === 'teacher') {
             TeacherCourseAccess::assertCanManageCourse($user, (int) $assignment->course_id);
         }
-        $hasAccess = $user->role === 'admin' || ($user->role === 'student' && Enrollment::where('user_id', $user->id)
+        $enrollmentQuery = Enrollment::where('user_id', $user->id)
             ->where('course_id', $assignment->course_id)
-            ->where('status', 'approved')
-            ->exists());
+            ->where('status', 'approved');
+        if ($assignment->batch_id) $enrollmentQuery->where('batch_id', $assignment->batch_id);
+        $hasAccess = $user->role === 'admin' || ($user->role === 'student' && $enrollmentQuery->exists());
 
         if (!$hasAccess) {
             abort(403, 'Approved enrollment in this course is required to submit assignments.');
@@ -288,7 +289,13 @@ class CourseEnterpriseController extends Controller
             ->where('status', 'approved')
             ->firstOrFail();
 
-        $validLessonIds = $course->lessons()->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $lessonsQuery = $course->lessons();
+        if ($enrollment->batch_id) {
+            $lessonsQuery->where(fn ($query) => $query->whereNull('batch_id')->orWhere('batch_id', $enrollment->batch_id));
+        } else {
+            $lessonsQuery->whereNull('batch_id');
+        }
+        $validLessonIds = $lessonsQuery->pluck('id')->map(fn ($id) => (int) $id)->all();
         $totalLessons = count($validLessonIds);
         $completedLessonIds = array_map('intval', $enrollment->completed_lesson_ids ?? []);
         $completedCount = count(array_unique(array_intersect($completedLessonIds, $validLessonIds)));
