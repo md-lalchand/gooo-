@@ -485,7 +485,7 @@ PHP
             app(SystemUpdateService::class)->applyUpdateZip($zipPath, 'failed-migration.zip', 'Site Admin', $sandboxBase);
             $this->fail('Failed migration must abort the update.');
         } catch (RuntimeException $exception) {
-            $this->assertStringContainsString('migrations failed', strtolower($exception->getMessage()));
+            $this->assertTrue(str_contains(strtolower($exception->getMessage()), 'migrations failed'));
         }
 
         $this->assertSame('stable-before-update', file_get_contents($sandboxBase . '/resources/views/panel.txt'));
