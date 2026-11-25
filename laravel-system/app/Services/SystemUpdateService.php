@@ -208,6 +208,7 @@ class SystemUpdateService
                 'system_version' => $this->currentVersion(),
                 'created_at' => now()->toIso8601String(),
                 'created_by' => $actorName,
+                'table_directory' => 'backup-tables-' . $stamp,
                 'table_counts' => $counts,
                 'table_hashes' => $tableHashes,
                 'table_files' => array_combine(
@@ -243,7 +244,7 @@ class SystemUpdateService
                 'payload_json' => $json,
             ]);
 
-            $finalTablesDir = $backupDir . DIRECTORY_SEPARATOR . 'backup-' . $snapshot->id . '-tables';
+            $finalTablesDir = $backupDir . DIRECTORY_SEPARATOR . $payload['table_directory'];
             if (!@rename($temporaryTablesDir, $finalTablesDir)) {
                 $snapshot->delete();
                 @unlink($fullPath);
@@ -502,7 +503,11 @@ class SystemUpdateService
                 throw new RuntimeException('Streamed backup table manifest is malformed.');
             }
 
-            $tableDir = storage_path('app/backups/backup-' . $snapshot->id . '-tables');
+            $directoryName = $decoded['table_directory'] ?? null;
+            if (!is_string($directoryName) || !preg_match('/^backup-tables-[A-Za-z0-9-]+$/', $directoryName)) {
+                throw new RuntimeException('Streamed backup table directory metadata is invalid.');
+            }
+            $tableDir = storage_path('app/backups/' . $directoryName);
             $tableFiles = [];
             foreach ($counts as $table => $count) {
                 if (!is_string($table) || !isset($allowedTables[$table])
