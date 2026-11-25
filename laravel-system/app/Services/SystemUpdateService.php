@@ -68,6 +68,48 @@ class SystemUpdateService
         'certificates',
     ];
 
+    /**
+     * Include every application table, not just the built-in LMS table allowlist.
+     * Ephemeral framework queues/cache/session data is intentionally excluded.
+     */
+    private function backupTableNames(): array
+    {
+        $ephemeral = [
+            'cache', 'cache_locks', 'sessions', 'jobs', 'job_batches',
+            'failed_jobs', 'backup_snapshots', 'telescope_entries', 'telescope_entries_tags',
+            'telescope_monitoring', 'pulse_values', 'pulse_entries',
+            'pulse_aggregates',
+        ];
+        $driver = DB::getDriverName();
+        if ($driver === 'sqlite') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->name,
+                DB::select("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            );
+        } elseif ($driver === 'mysql') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->table_name,
+                DB::select("SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'")
+            );
+        } elseif ($driver === 'pgsql') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->table_name,
+                DB::select("SELECT tablename AS table_name FROM pg_tables WHERE schemaname = current_schema()")
+            );
+        } else {
+            $discovered = Schema::getTableListing();
+        }
+
+        $tables = array_unique(array_merge(self::BUSINESS_TABLES, $discovered));
+        return array_values(array_filter($tables, static function ($table) use ($ephemeral) {
+            return is_string($table)
+                && preg_match('/^[A-Za-z0-9_]+$/', $table)
+                && !in_array($table, $ephemeral, true)
+                && !str_starts_with($table, 'telescope_')
+                && !str_starts_with($table, 'pulse_');
+        }));
+    }
+
     public function currentVersion(): string
     {
         try {
@@ -110,7 +152,7 @@ class SystemUpdateService
         $tables = [];
         $counts = [];
 
-        foreach (self::BUSINESS_TABLES as $table) {
+        foreach ($this->backupTableNames() as $table) {
             if (!Schema::hasTable($table)) {
                 continue;
             }
@@ -177,13 +219,202 @@ class SystemUpdateService
             throw $exception;
         }
 
+        try {
+            $archivePath = $this->createPortableBackupArchive($snapshot, $json);
+        } catch (\Throwable $exception) {
+            $snapshot->delete();
+            @unlink($fullPath);
+            throw $exception;
+        }
+
         return [
             'snapshot' => $snapshot,
             'file_path' => 'storage/app/backups/' . $fileName,
+            'archive_path' => $archivePath,
             'file_name' => $fileName,
             'checksum' => $checksum,
             'table_counts' => $counts,
         ];
+    }
+
+    /**
+     * Backup encryption is deliberately independent from APP_KEY so a restored
+     * .env can contain a different APP_KEY without making the backup undecryptable.
+     * Keep BACKUP_ENCRYPTION_KEY in an external secret manager and escrow it separately.
+     */
+    private function resolveBackupEncryptionKey(): string
+    {
+        $configured = trim((string) config('backup.encryption_key', ''));
+        if (preg_match('/^[a-f0-9]{64}$/i', $configured)) {
+            $key = hex2bin($configured);
+            if (is_string($key) && strlen($key) === 32) {
+                return $key;
+            }
+        }
+
+        $decoded = base64_decode($configured, true);
+        if (is_string($decoded) && strlen($decoded) === 32) {
+            return $decoded;
+        }
+
+        throw new RuntimeException(
+            'BACKUP_ENCRYPTION_KEY must be a separately escrowed 32-byte key (64 hex or base64). Portable backup is disabled until it is configured.'
+        );
+    }
+
+    private function encryptBackupSecret(string $plaintext): string
+    {
+        $nonce = random_bytes(12);
+        $tag = '';
+        $ciphertext = openssl_encrypt(
+            $plaintext,
+            'aes-256-gcm',
+            $this->resolveBackupEncryptionKey(),
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            'lms-portable-backup-v1',
+            16
+        );
+        if (!is_string($ciphertext) || strlen($tag) !== 16) {
+            throw new RuntimeException('Unable to encrypt the environment backup.');
+        }
+
+        return 'v1:' . base64_encode($nonce . $tag . $ciphertext);
+    }
+
+    private function decryptBackupSecret(string $envelope): string
+    {
+        if (!str_starts_with($envelope, 'v1:')) {
+            throw new RuntimeException('Unsupported encrypted environment backup format.');
+        }
+        $payload = base64_decode(substr($envelope, 3), true);
+        if (!is_string($payload) || strlen($payload) < 28) {
+            throw new RuntimeException('Encrypted environment backup is malformed.');
+        }
+
+        $nonce = substr($payload, 0, 12);
+        $tag = substr($payload, 12, 16);
+        $ciphertext = substr($payload, 28);
+        $plaintext = openssl_decrypt(
+            $ciphertext,
+            'aes-256-gcm',
+            $this->resolveBackupEncryptionKey(),
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag,
+            'lms-portable-backup-v1'
+        );
+        if (!is_string($plaintext)) {
+            throw new RuntimeException('Environment backup authentication failed. Check BACKUP_ENCRYPTION_KEY.');
+        }
+        return $plaintext;
+    }
+
+    private function createPortableBackupArchive(BackupSnapshot $snapshot, string $databaseJson): string
+    {
+        if (!class_exists(ZipArchive::class)) {
+            throw new RuntimeException('PHP zip extension is required for portable backups.');
+        }
+        $backupDir = storage_path('app/backups');
+        if (!is_dir($backupDir) && !mkdir($backupDir, 0700, true) && !is_dir($backupDir)) {
+            throw new RuntimeException('Unable to create the private backup directory.');
+        }
+        $archivePath = $backupDir . DIRECTORY_SEPARATOR . 'backup-' . $snapshot->id . '.zip';
+        $temporaryPath = $archivePath . '.tmp';
+        $zip = new ZipArchive();
+        if ($zip->open($temporaryPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException('Unable to create portable backup archive.');
+        }
+
+        $entries = ['database.json' => $databaseJson];
+        $envPath = base_path('.env');
+        if (!is_file($envPath) || !is_readable($envPath)) {
+            $zip->close();
+            @unlink($temporaryPath);
+            throw new RuntimeException('The application environment file is missing or unreadable; portable backup aborted.');
+        }
+        $envContents = file_get_contents($envPath);
+        if (!is_string($envContents)) {
+            $zip->close();
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to read the application environment file.');
+        }
+        $entries['environment/.env.encrypted'] = $this->encryptBackupSecret($envContents);
+
+        foreach ([
+            'storage-app-public' => storage_path('app/public'),
+            'public-uploads' => public_path('uploads'),
+            'data-uploads' => base_path('data/uploads'),
+        ] as $rootName => $rootPath) {
+            $entries['uploads/' . $rootName . '/.backup-root'] = 'root';
+            if (!is_dir($rootPath)) {
+                continue;
+            }
+            if (is_link($rootPath)) {
+                $zip->close();
+                @unlink($temporaryPath);
+                throw new RuntimeException("Refusing to back up a symlinked upload directory: {$rootName}");
+            }
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($rootPath, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($iterator as $item) {
+                if (!$item->isFile()) {
+                    continue;
+                }
+                if ($item->isLink()) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException("Refusing to back up a symlinked upload file: {$rootName}");
+                }
+                $relative = str_replace(DIRECTORY_SEPARATOR, '/', substr($item->getPathname(), strlen($rootPath) + 1));
+                if ($relative === '' || str_contains($relative, '../')) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException('Unsafe upload path encountered during backup.');
+                }
+                $content = file_get_contents($item->getPathname());
+                if (!is_string($content)) {
+                    $zip->close();
+                    @unlink($temporaryPath);
+                    throw new RuntimeException("Unable to read upload file: {$relative}");
+                }
+                $entries['uploads/' . $rootName . '/' . $relative] = $content;
+            }
+        }
+
+        $manifestEntries = [];
+        foreach ($entries as $name => $content) {
+            $manifestEntries[$name] = hash('sha256', $content);
+            if (!$zip->addFromString($name, $content)) {
+                $zip->close();
+                @unlink($temporaryPath);
+                throw new RuntimeException("Unable to add backup entry: {$name}");
+            }
+        }
+        $manifest = json_encode([
+            'format' => 'lms-portable-backup-v1',
+            'snapshot_id' => $snapshot->id,
+            'created_at' => now()->toIso8601String(),
+            'entries' => $manifestEntries,
+        ], JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($manifest) || !$zip->addFromString('manifest.json', $manifest) || !$zip->close()) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to finalize portable backup archive.');
+        }
+
+        $archiveHash = hash_file('sha256', $temporaryPath);
+        if (!is_string($archiveHash) || !rename($temporaryPath, $archivePath)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to verify and finalize portable backup archive.');
+        }
+        @chmod($archivePath, 0600);
+        if (!hash_equals($archiveHash, (string) hash_file('sha256', $archivePath))) {
+            @unlink($archivePath);
+            throw new RuntimeException('Portable backup archive checksum verification failed.');
+        }
+        return $archivePath;
     }
 
     public function verifyBackupSnapshot(BackupSnapshot $snapshot): array
@@ -220,7 +451,7 @@ class SystemUpdateService
             throw new RuntimeException('Backup table-count manifest does not match the table payload.');
         }
 
-        $allowedTables = array_flip(self::BUSINESS_TABLES);
+        $allowedTables = array_flip($this->backupTableNames());
         $validatedTables = [];
 
         foreach ($tablesData as $table => $rows) {
@@ -263,13 +494,214 @@ class SystemUpdateService
         ];
     }
 
-    public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName): array
+    public function verifyPortableBackupArchive(BackupSnapshot $snapshot): void
+    {
+        $this->verifyBackupSnapshot($snapshot);
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        if (!is_file($archivePath)) {
+            throw new RuntimeException('Portable backup archive is missing.');
+        }
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Portable backup archive cannot be opened.');
+        }
+        try {
+            $manifestJson = $zip->getFromName('manifest.json');
+            $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
+            if (!is_array($manifest)
+                || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
+                || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+                || !is_array($manifest['entries'] ?? null)
+            ) {
+                throw new RuntimeException('Portable backup manifest is invalid.');
+            }
+            foreach ($manifest['entries'] as $name => $expectedHash) {
+                if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
+                    || str_contains($name, '\\') || !is_string($expectedHash)
+                ) {
+                    throw new RuntimeException('Portable backup contains an unsafe entry path.');
+                }
+                $content = $zip->getFromName($name);
+                if (!is_string($content) || !hash_equals($expectedHash, hash('sha256', $content))) {
+                    throw new RuntimeException("Portable backup checksum verification failed for {$name}.");
+                }
+            }
+        } finally {
+            $zip->close();
+        }
+    }
+
+    public function restorePortableBackup(BackupSnapshot $snapshot, string $actorName): array
+    {
+        $this->verifyBackupSnapshot($snapshot);
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        if (!is_file($archivePath) || !class_exists(ZipArchive::class)) {
+            throw new RuntimeException('Verified portable backup archive is missing or ZIP support is unavailable.');
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Unable to open portable backup archive.');
+        }
+        $manifestJson = $zip->getFromName('manifest.json');
+        $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
+        if (!is_array($manifest)
+            || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
+            || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+            || !is_array($manifest['entries'] ?? null)
+        ) {
+            $zip->close();
+            throw new RuntimeException('Portable backup manifest is invalid.');
+        }
+
+        $verifiedEntries = [];
+        foreach ($manifest['entries'] as $name => $expectedHash) {
+            if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
+                || str_contains($name, '\\') || !is_string($expectedHash)
+            ) {
+                $zip->close();
+                throw new RuntimeException('Portable backup contains an unsafe entry path.');
+            }
+            $content = $zip->getFromName($name);
+            if (!is_string($content) || !hash_equals($expectedHash, hash('sha256', $content))) {
+                $zip->close();
+                throw new RuntimeException("Portable backup checksum verification failed for {$name}.");
+            }
+            $verifiedEntries[$name] = $content;
+        }
+        if (($verifiedEntries['database.json'] ?? null) !== (string) $snapshot->payload_json
+            || !isset($verifiedEntries['environment/.env.encrypted'])
+        ) {
+            $zip->close();
+            throw new RuntimeException('Portable archive does not match the verified database snapshot.');
+        }
+        try {
+            $environmentContents = $this->decryptBackupSecret($verifiedEntries['environment/.env.encrypted']);
+        } catch (\Throwable $exception) {
+            $zip->close();
+            throw new RuntimeException('Encrypted environment backup cannot be decrypted with the current application key.', 0, $exception);
+        }
+        $zip->close();
+
+        $stagingRoot = storage_path('app/restore-staging-' . $snapshot->id . '-' . bin2hex(random_bytes(4)));
+        $rollbackRoot = storage_path('app/restore-rollback-' . $snapshot->id . '-' . bin2hex(random_bytes(4)));
+        $targets = [
+            'storage-app-public' => storage_path('app/public'),
+            'public-uploads' => public_path('uploads'),
+            'data-uploads' => base_path('data/uploads'),
+        ];
+        $staged = [];
+        foreach ($targets as $rootName => $targetPath) {
+            $stagePath = $stagingRoot . DIRECTORY_SEPARATOR . $rootName;
+            if (!mkdir($stagePath, 0700, true) && !is_dir($stagePath)) {
+                throw new RuntimeException('Unable to prepare upload restore staging directory.');
+            }
+            $prefix = 'uploads/' . $rootName . '/';
+            foreach ($verifiedEntries as $name => $content) {
+                if (!str_starts_with($name, $prefix) || str_ends_with($name, '/.backup-root')) {
+                    continue;
+                }
+                $relative = substr($name, strlen($prefix));
+                $segments = explode('/', $relative);
+                if ($relative === '' || in_array('', $segments, true) || in_array('.', $segments, true) || in_array('..', $segments, true)) {
+                    throw new RuntimeException('Unsafe upload restore path detected.');
+                }
+                $destination = $stagePath . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $segments);
+                $directory = dirname($destination);
+                if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+                    throw new RuntimeException('Unable to create upload restore directory.');
+                }
+                if (file_put_contents($destination, $content, LOCK_EX) === false) {
+                    throw new RuntimeException('Unable to stage an upload file for restore.');
+                }
+            }
+            $staged[$rootName] = ['stage' => $stagePath, 'target' => $targetPath];
+        }
+
+        $environmentRestorePath = storage_path('app/backups/restored-environment-' . $snapshot->id . '.env');
+        $envTemp = $environmentRestorePath . '.tmp';
+        if (file_put_contents($envTemp, $environmentContents, LOCK_EX) === false || !rename($envTemp, $environmentRestorePath)) {
+            @unlink($envTemp);
+            throw new RuntimeException('Unable to write the decrypted environment restore copy.');
+        }
+        @chmod($environmentRestorePath, 0600);
+
+        $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before portable restore #{$snapshot->id})");
+        $swapped = [];
+        try {
+            foreach ($staged as $rootName => $paths) {
+                $target = $paths['target'];
+                if (is_link($target)) {
+                    throw new RuntimeException("Refusing to overwrite symlinked upload directory: {$rootName}");
+                }
+                $rollback = $rollbackRoot . DIRECTORY_SEPARATOR . $rootName;
+                if (is_dir($target)) {
+                    if (!is_dir(dirname($rollback)) && !mkdir(dirname($rollback), 0700, true) && !is_dir(dirname($rollback))) {
+                        throw new RuntimeException('Unable to prepare upload rollback directory.');
+                    }
+                    if (!rename($target, $rollback)) {
+                        throw new RuntimeException("Unable to preserve current upload directory: {$rootName}");
+                    }
+                }
+                $swapped[$rootName] = ['target' => $target, 'rollback' => $rollback, 'had_target' => is_dir($rollback)];
+                if (!is_dir(dirname($target)) && !mkdir(dirname($target), 0755, true) && !is_dir(dirname($target))) {
+                    throw new RuntimeException('Unable to prepare upload destination directory.');
+                }
+                if (!rename($paths['stage'], $target)) {
+                    throw new RuntimeException("Unable to activate restored upload directory: {$rootName}");
+                }
+                @chmod($target, 0750);
+            }
+            $restoredCounts = $this->restoreBackupSnapshot($snapshot, $actorName, false);
+        } catch (\Throwable $exception) {
+            foreach (array_reverse($swapped) as $swap) {
+                if (is_dir($swap['target'])) {
+                    $this->removeDirectoryTree($swap['target']);
+                }
+                if ($swap['had_target'] && is_dir($swap['rollback'])) {
+                    @rename($swap['rollback'], $swap['target']);
+                }
+            }
+            $this->removeDirectoryTree($stagingRoot);
+            throw new RuntimeException('Portable restore failed; upload directories were rolled back. ' . $exception->getMessage(), 0, $exception);
+        }
+
+        $this->removeDirectoryTree($stagingRoot);
+        $this->removeDirectoryTree($rollbackRoot);
+        return [
+            'table_counts' => $restoredCounts,
+            'environment_restore_path' => $environmentRestorePath,
+        ];
+    }
+
+    private function removeDirectoryTree(string $path): void
+    {
+        if (!is_dir($path) || is_link($path)) {
+            return;
+        }
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterator as $item) {
+            if ($item->isDir() && !$item->isLink()) {
+                @rmdir($item->getPathname());
+            } else {
+                @unlink($item->getPathname());
+            }
+        }
+        @rmdir($path);
+    }
+
+    public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName, bool $createSafetyBackup = true): array
     {
         $verified = $this->verifyBackupSnapshot($snapshot);
         $tablesData = $verified['tables'];
 
         // Preserve the current live state before any destructive restore work.
-        $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
+        if ($createSafetyBackup) {
+            $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
+        }
 
         $restoredCounts = [];
         DB::transaction(function () use ($tablesData, &$restoredCounts) {
@@ -277,13 +709,13 @@ class SystemUpdateService
             try {
                 // Clear every currently supported business table. Tables absent
                 // from an older snapshot correctly return to an empty state.
-                foreach (array_reverse(self::BUSINESS_TABLES) as $table) {
+                foreach (array_reverse($this->backupTableNames()) as $table) {
                     if (Schema::hasTable($table)) {
                         DB::table($table)->delete();
                     }
                 }
 
-                foreach (self::BUSINESS_TABLES as $table) {
+                foreach (array_keys($tablesData) as $table) {
                     if (!Schema::hasTable($table)) {
                         continue;
                     }

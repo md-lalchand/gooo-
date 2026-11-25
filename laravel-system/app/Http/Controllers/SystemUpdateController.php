@@ -17,25 +17,25 @@ class SystemUpdateController extends Controller
         $label = trim((string) $request->input('label', 'Full Non-Destructive System Backup'));
         $result = $this->updater->createFullBackup($request->user()->name, $label ?: 'Full Non-Destructive System Backup');
 
-        return back()->with('status', "Full verified backup created (#{$result['snapshot']->id}, SHA-256: " . substr($result['checksum'], 0, 12) . "...).");
+        return back()->with('status', "Full portable backup created (#{$result['snapshot']->id}) with database, uploads, and encrypted environment. Archive SHA-256: " . substr((string) hash_file('sha256', $result['archive_path']), 0, 12) . "...");
     }
 
     public function downloadBackup(BackupSnapshot $snapshot)
     {
-        $this->updater->verifyBackupSnapshot($snapshot);
-        $filename = 'lms-backup-' . $snapshot->id . '-' . now()->format('Ymd-His') . '.json';
-        return response($snapshot->payload_json, 200, [
-            'Content-Type' => 'application/json',
-            'Content-Disposition' => 'attachment; filename="' . $filename . '"',
-        ]);
+        $this->updater->verifyPortableBackupArchive($snapshot);
+        $path = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        abort_unless(is_file($path), 404, 'Portable backup archive not found.');
+        $filename = 'lms-portable-backup-' . $snapshot->id . '-' . now()->format('Ymd-His') . '.zip';
+        return response()->download($path, $filename, ['Content-Type' => 'application/zip']);
     }
 
     public function restoreBackup(Request $request, BackupSnapshot $snapshot)
     {
         try {
-            $counts = $this->updater->restoreBackupSnapshot($snapshot, $request->user()->name);
+            $result = $this->updater->restorePortableBackup($snapshot, $request->user()->name);
+            $counts = $result['table_counts'];
             $totalRows = array_sum($counts);
-            return back()->with('status', "Backup #{$snapshot->id} verified and restored cleanly ({$totalRows} records restored across " . count($counts) . " tables).");
+            return back()->with('status', "Portable backup #{$snapshot->id} restored ({$totalRows} database records). Uploads restored. The encrypted environment was decrypted to {$result['environment_restore_path']} for an administrator to review before manually replacing .env.");
         } catch (\Throwable $e) {
             return back()->withErrors(['update' => $e->getMessage()]);
         }

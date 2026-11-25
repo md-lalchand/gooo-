@@ -15,6 +15,7 @@ use App\Services\SystemUpdateService;
 use App\Support\BrandSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
@@ -40,6 +41,7 @@ class NonDestructiveSystemUpdateTest extends TestCase
         $this->lockPath = storage_path('installed.lock');
         $this->envPath = base_path('.env');
         $this->versionJsonPath = base_path('version.json');
+        putenv('BACKUP_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=');
 
         if (is_file($this->lockPath)) {
             $this->originalLock = file_get_contents($this->lockPath) ?: '';
@@ -295,10 +297,10 @@ PHP
 
         $snapshot = BackupSnapshot::latest('id')->firstOrFail();
 
-        // 2. Download verified backup JSON
+        // 2. Download the verified portable ZIP backup
         $dl = $this->actingAs($admin)->get(route('portal.updates.backup.download', $snapshot));
         $dl->assertOk();
-        $dl->assertHeader('Content-Type', 'application/json');
+        $dl->assertHeader('Content-Type', 'application/zip');
 
         // 3. Mutate data (including parity tables) then restore backup snapshot and verify data recovery
         $invoice->delete();
@@ -495,6 +497,80 @@ PHP
             'package_name' => 'failed-migration.zip',
             'status' => 'rollback_failed',
         ]);
+    }
+
+    public function test_portable_backup_contains_encrypted_environment_and_restores_database_consistently(): void
+    {
+        $admin = User::create([
+            'name' => 'Backup Admin',
+            'email' => 'backup-admin@example.test',
+            'role' => 'admin',
+            'password' => Hash::make('StrongBackupPass123!'),
+        ]);
+        $student = User::create([
+            'name' => 'Snapshot Student',
+            'email' => 'snapshot-student@example.test',
+            'role' => 'student',
+            'password' => Hash::make('StrongStudentPass123!'),
+        ]);
+
+        $service = app(SystemUpdateService::class);
+        $result = $service->createFullBackup($admin->name, 'Portable backup regression');
+        $archivePath = storage_path('app/backups/backup-' . $result['snapshot']->id . '.zip');
+        $this->assertFileExists($archivePath);
+        $this->cleanupFiles[] = $archivePath;
+
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($archivePath) === true);
+        $this->assertIsString($zip->getFromName('database.json'));
+        $encryptedEnvironment = $zip->getFromName('environment/.env.encrypted');
+        $this->assertIsString($encryptedEnvironment);
+        $this->assertStringNotContainsString('APP_NAME=', $encryptedEnvironment);
+        $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
+        $this->assertSame('lms-portable-backup-v1', $manifest['format'] ?? null);
+        $this->assertArrayHasKey('uploads/storage-app-public/.backup-root', $manifest['entries'] ?? []);
+        $zip->close();
+
+        // Backup encryption must survive APP_KEY rotation on the restore host.
+        config(['app.key' => 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=']);
+
+        User::create([
+            'name' => 'Post Snapshot User',
+            'email' => 'after-snapshot@example.test',
+            'role' => 'student',
+            'password' => Hash::make('StrongStudentPass456!'),
+        ]);
+        $restored = $service->restorePortableBackup($result['snapshot'], $admin->name);
+
+        $this->assertArrayHasKey('table_counts', $restored);
+        $this->assertFileExists($restored['environment_restore_path']);
+        $this->cleanupFiles[] = $restored['environment_restore_path'];
+        $this->assertDatabaseHas('users', ['email' => 'snapshot-student@example.test']);
+        $this->assertDatabaseMissing('users', ['email' => 'after-snapshot@example.test']);
+    }
+
+    public function test_portable_backup_captures_plugin_tables_not_in_the_builtin_allowlist(): void
+    {
+        Schema::create('plugin_custom_data', function (\Illuminate\Database\Schema\Blueprint $table) {
+            $table->id();
+            $table->string('payload');
+        });
+        DB::table('plugin_custom_data')->insert(['payload' => 'must-survive-restore']);
+
+        try {
+            $service = app(SystemUpdateService::class);
+            $snapshot = $service->createFullBackup('Backup Admin', 'Dynamic table coverage')['snapshot'];
+            $payload = json_decode((string) $snapshot->payload_json, true);
+            $this->assertArrayHasKey('plugin_custom_data', $payload['tables'] ?? []);
+            $this->assertSame('must-survive-restore', $payload['tables']['plugin_custom_data'][0]['payload'] ?? null);
+            DB::table('plugin_custom_data')->delete();
+
+            $service->restoreBackupSnapshot($snapshot, 'Backup Admin', false);
+
+            $this->assertDatabaseHas('plugin_custom_data', ['payload' => 'must-survive-restore']);
+        } finally {
+            Schema::dropIfExists('plugin_custom_data');
+        }
     }
 
     private function removeDirectoryRecursive(string $dir): void
