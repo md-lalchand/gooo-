@@ -560,13 +560,14 @@ PHP
         try {
             $service = app(SystemUpdateService::class);
             $snapshot = $service->createFullBackup('Backup Admin', 'Dynamic table coverage')['snapshot'];
+            $payload = json_decode((string) $snapshot->payload_json, true);
+            $this->assertArrayHasKey('plugin_custom_data', $payload['tables'] ?? []);
+            $this->assertSame('must-survive-restore', $payload['tables']['plugin_custom_data'][0]['payload'] ?? null);
             DB::table('plugin_custom_data')->delete();
 
             $service->restoreBackupSnapshot($snapshot, 'Backup Admin', false);
 
             $this->assertDatabaseHas('plugin_custom_data', ['payload' => 'must-survive-restore']);
-            $payload = json_decode((string) $snapshot->payload_json, true);
-            $this->assertArrayHasKey('plugin_custom_data', $payload['tables'] ?? []);
         } finally {
             Schema::dropIfExists('plugin_custom_data');
         }
