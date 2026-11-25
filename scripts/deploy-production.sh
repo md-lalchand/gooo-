@@ -36,6 +36,7 @@ npm run build
 
 sudo systemctl restart "$NODE_SERVICE"
 sudo systemctl reload "$PHP_FPM_SERVICE"
+cd "$DEPLOY_PATH/laravel-system"
 php artisan up
 trap - EXIT
 
