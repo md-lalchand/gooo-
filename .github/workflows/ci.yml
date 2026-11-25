@@ -75,26 +75,51 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           PORT: '3100'
         run: |
+          set -euo pipefail
+          cleanup() {
+            kill "${pid_3100:-}" "${pid_3101:-}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          wait_for_api() {
+            local port="$1"
+            local pid="$2"
+            local log="$3"
+            local output="$4"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent "http://127.0.0.1:${port}/api/public/bootstrap" > "$output"; then
+                return 0
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "Node API process on port ${port} exited before becoming healthy."
+                cat "$log"
+                return 1
+              fi
+              sleep 2
+            done
+            echo "Node API process on port ${port} did not become healthy."
+            cat "$log"
+            return 1
+          }
+
+          # Initialize the shared SQLite test database with the first process.
+          # Starting both processes simultaneously races the first-run schema/seed setup.
           npm start > /tmp/node-api-3100.log 2>&1 &
-          echo $! > /tmp/node-api-3100.pid
+          pid_3100=$!
+          wait_for_api 3100 "$pid_3100" /tmp/node-api-3100.log /tmp/node-bootstrap.json
+
           PORT=3101 npm start > /tmp/node-api-3101.log 2>&1 &
-          echo $! > /tmp/node-api-3101.pid
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3100/api/public/bootstrap > /tmp/node-bootstrap.json; then
-              break
-            fi
-            sleep 2
-          done
-          test -s /tmp/node-bootstrap.json
+          pid_3101=$!
+          wait_for_api 3101 "$pid_3101" /tmp/node-api-3101.log /tmp/node-bootstrap-3101.json
+
           # Both processes must consume the same Redis guest-IP counter.
           last_status=0
           for attempt in $(seq 1 121); do
             port=3100
             if [ $((attempt % 2)) -eq 0 ]; then port=3101; fi
-            last_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/api/public/bootstrap")
+            last_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:${port}/api/public/bootstrap")
           done
           test "$last_status" = "429"
-          kill "$(cat /tmp/node-api-3100.pid)" "$(cat /tmp/node-api-3101.pid)" || true
 
       - uses: shivammathur/setup-php@v2
         with:
