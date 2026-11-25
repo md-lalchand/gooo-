@@ -1,0 +1,557 @@
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edupro-sec-test-'));
+const tempDbPath = path.join(tempDir, 'edupro-test.db');
+const prevSqliteEnv = process.env.SQLITE_DB_PATH;
+const prevSessionSecret = process.env.SESSION_SECRET;
+process.env.SQLITE_DB_PATH = tempDbPath;
+process.env.SESSION_SECRET = 'test-session-secret-minimum-32-chars-edupro-2026';
+
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+  closeSqliteDb,
+  consumePasswordResetToken,
+  createPasswordResetToken,
+  createSessionRecord,
+  findValidSessionByToken,
+  getSqliteDb,
+  hashPassword,
+  recordLoginFailure,
+  revokeAllUserSessions,
+  sanitizeLegacyStateForRelationalMigration,
+  verifyPassword,
+} from '../db/persistence';
+import {
+  computeTotpCode,
+  generateTotpSecret,
+  isStrongPassword,
+  isValidRole,
+  signSessionToken,
+  verifySignedSessionToken,
+  verifyTotpCode,
+} from './security';
+import {
+  assertBranchOperationalForTransactions,
+  computeWebhookSignature,
+  initiateServerPaymentSession,
+  processSignedWebhookCallback,
+} from './paymentService';
+import {
+  createVerifiedBackupSnapshot,
+  getDb,
+  restoreBackupFromSnapshot,
+  safeSystemResetWithBackup,
+  saveDb,
+  verifyBackupSnapshotIntegrity,
+} from './store';
+
+after(() => {
+  closeSqliteDb();
+  if (prevSqliteEnv === undefined) {
+    delete process.env.SQLITE_DB_PATH;
+  } else {
+    process.env.SQLITE_DB_PATH = prevSqliteEnv;
+  }
+  if (prevSessionSecret === undefined) {
+    delete process.env.SESSION_SECRET;
+  } else {
+    process.env.SESSION_SECRET = prevSessionSecret;
+  }
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+describe('EDUPro Security, RBAC, DB Constraints & Payments', () => {
+  test('only allows the 5 authorized roles and blocks legacy/escalation roles', () => {
+    assert.equal(isValidRole('admin'), true);
+    assert.equal(isValidRole('branch'), true);
+    assert.equal(isValidRole('teacher'), true);
+    assert.equal(isValidRole('student'), true);
+    assert.equal(isValidRole('guardian'), true);
+
+    assert.equal(isValidRole('branch_manager'), false);
+    assert.equal(isValidRole('super_admin'), false);
+    assert.equal(isValidRole('sub_admin'), false);
+    assert.equal(isValidRole('branch_admin'), false);
+  });
+
+  test('enforces single Main Admin constraint at SQLite schema level (idx_single_main_admin)', () => {
+    const state = getDb();
+    assert.equal(state.users.filter((u) => u.role === 'admin').length, 1);
+
+    const sqlite = getSqliteDb();
+    assert.throws(() => {
+      sqlite
+        .prepare(
+          `INSERT INTO users (id, name, email, phone, role, status, password_hash, created_at)
+           VALUES (?, ?, ?, ?, 'admin', 'active', ?, ?)`
+        )
+        .run('u-rogue-admin', 'Rogue Admin', 'rogue@example.com', '01700009999', 'salt:hash', new Date().toISOString());
+    }, /UNIQUE constraint failed/i);
+  });
+
+  test('legacy state migration aborts on multiple admins and revokes branch_manager without promotion', () => {
+    const baseState = getDb();
+
+    // Abort if >1 admin exists in legacy JSON
+    assert.throws(() => {
+      sanitizeLegacyStateForRelationalMigration(
+        {
+          users: [
+            { ...baseState.users[0], id: 'a1', email: 'a1@example.com', role: 'admin' },
+            { ...baseState.users[0], id: 'a2', email: 'a2@example.com', role: 'admin' },
+          ],
+        },
+        () => baseState
+      );
+    }, /CRITICAL SECURITY HALT/i);
+
+    // Revoke branch_manager into revokedAccounts without promoting to teacher
+    const prevAdminEmail = process.env.ADMIN_EMAIL;
+    const prevAdminPass = process.env.ADMIN_PASSWORD;
+    delete process.env.ADMIN_EMAIL;
+    delete process.env.ADMIN_PASSWORD;
+
+    const migrated = sanitizeLegacyStateForRelationalMigration(
+      {
+        users: [
+          {
+            ...baseState.users[0],
+            id: 'u-admin',
+            role: 'admin',
+            passwordUpdatedAt: null,
+          },
+          {
+            id: 'u-manager',
+            name: 'Legacy Manager',
+            email: 'manager@alomsenglish.com',
+            phone: '01711112222',
+            role: 'branch_manager' as unknown as 'teacher',
+            branchId: 'br-mirpur',
+            status: 'active',
+            createdAt: new Date().toISOString(),
+            passwordHash: '',
+            passwordUpdatedAt: null,
+          } as unknown as typeof baseState.users[number],
+        ],
+      },
+      () => baseState
+    );
+
+    if (prevAdminEmail !== undefined) process.env.ADMIN_EMAIL = prevAdminEmail;
+    if (prevAdminPass !== undefined) process.env.ADMIN_PASSWORD = prevAdminPass;
+
+    assert.equal(migrated.adminNeedsProvisioning, true);
+    assert.equal(migrated.state.users.some((u) => u.id === 'u-manager'), false);
+    assert.equal(
+      migrated.revokedAccounts.some((r) => r.originalUserId === 'u-manager' && r.previousRole === 'branch_manager'),
+      true
+    );
+  });
+
+  test('password hashing, strength checks, signed session tokens, and session revocation work properly', () => {
+    assert.equal(isStrongPassword('short1', 8), false);
+    assert.equal(isStrongPassword('onlyletters', 8), false);
+    assert.equal(isStrongPassword('StrongPass123', 10), true);
+
+    const hashed = hashPassword('MySecretPass99!');
+    assert.equal(verifyPassword('MySecretPass99!', hashed), true);
+    assert.equal(verifyPassword('WrongPass99!', hashed), false);
+
+    const state = getDb();
+    const student = state.users.find((u) => u.role === 'student');
+    assert.ok(student);
+
+    const token = signSessionToken(student.id, student.role);
+    const verified = verifySignedSessionToken(token);
+    assert.ok(verified);
+    assert.equal(verified.userId, student.id);
+    assert.equal(verified.role, 'student');
+
+    // Tampered token must fail
+    const tampered = `${token.slice(0, -4)}XXXX`;
+    assert.equal(verifySignedSessionToken(tampered), null);
+
+    // Persisted session record & revocation
+    createSessionRecord({
+      userId: student.id,
+      rawToken: token,
+      ipAddress: '127.0.0.1',
+      userAgent: 'node-test',
+    });
+    assert.ok(findValidSessionByToken(token));
+    const revokedCount = revokeAllUserSessions(student.id);
+    assert.ok(revokedCount >= 1);
+    assert.equal(findValidSessionByToken(token), null);
+
+    // One-time password recovery token creation and single-use consumption
+    const resetToken = createPasswordResetToken(student.id);
+    assert.ok(resetToken.length >= 20);
+    assert.equal(consumePasswordResetToken(resetToken), student.id);
+    assert.equal(consumePasswordResetToken(resetToken), null);
+  });
+
+  test('login rate limiter locks out after 5 failures and clears on reset', () => {
+    const rateKey = `ip:127.0.0.1:email:locktest-${Date.now()}@example.com`;
+    for (let i = 0; i < 4; i += 1) {
+      const res = recordLoginFailure(rateKey, 5, 60_000);
+      assert.equal(res.locked, false);
+    }
+    const fifth = recordLoginFailure(rateKey, 5, 60_000);
+    assert.equal(fifth.locked, true);
+    const limitStatus = checkLoginRateLimit(rateKey);
+    assert.equal(limitStatus.allowed, false);
+    assert.ok(limitStatus.retryAfterSeconds > 0);
+
+    clearLoginRateLimit(rateKey);
+    assert.equal(checkLoginRateLimit(rateKey).allowed, true);
+  });
+
+  test('RFC 6238 TOTP 2FA accepts valid time-window code and rejects invalid codes', () => {
+    const secret = generateTotpSecret();
+    const now = Date.now();
+    const code = computeTotpCode(secret, now);
+    assert.match(code, /^\d{6}$/);
+    assert.equal(verifyTotpCode(secret, code, now), true);
+    assert.equal(verifyTotpCode(secret, '000000', now), code === '000000');
+    assert.equal(verifyTotpCode(secret, 'not-a-code', now), false);
+  });
+
+  test('verified backup snapshots compute valid SHA-256 checksums and detect tampering', () => {
+    const state = getDb();
+    const snapshot = createVerifiedBackupSnapshot(state, 'Main Admin', 'unit-test-backup', 'manual');
+    assert.equal(verifyBackupSnapshotIntegrity(snapshot), true);
+
+    const tampered = {
+      ...snapshot,
+      payloadJson: `${snapshot.payloadJson} `,
+    };
+    assert.equal(verifyBackupSnapshotIntegrity(tampered), false);
+  });
+
+  test('non-active branches block new transactions while active branches allow them', () => {
+    const state = getDb();
+    const branch = state.branches[0];
+    assert.ok(branch);
+    const origStatus = branch.status;
+
+    for (const blockedStatus of ['inactive', 'suspended', 'archived'] as const) {
+      branch.status = blockedStatus;
+      saveDb(state);
+      const check = assertBranchOperationalForTransactions(branch.id);
+      assert.equal(check.ok, false);
+    }
+
+    branch.status = 'active';
+    saveDb(state);
+    assert.equal(assertBranchOperationalForTransactions(branch.id).ok, true);
+
+    branch.status = origStatus;
+    saveDb(state);
+  });
+
+  test('payment sessions require signed webhook callback, verify HMAC strictly, and deduplicate replays', () => {
+    const state = getDb();
+    const student = state.users.find((u) => u.role === 'student');
+    const course = state.courses.find((c) => c.price > 0 && !state.enrollments.some((e) => e.userId === student?.id && e.courseId === c.id));
+    assert.ok(student);
+    assert.ok(course);
+
+    // Ensure student's branch is active
+    const targetBranch = state.branches.find((b) => b.status === 'active');
+    assert.ok(targetBranch);
+
+    const idempotencyKey = `test-idem-${crypto.randomBytes(6).toString('hex')}`;
+    const init1 = initiateServerPaymentSession({
+      user: student,
+      idempotencyKey,
+      referenceType: 'course',
+      courseId: course.id,
+      branchId: targetBranch.id,
+      gateway: 'bKash',
+    });
+    assert.equal(init1.ok, true);
+    if (!init1.ok || !init1.sandboxSignPayload) {
+      assert.fail('Expected sandboxSignPayload for paid course initiation');
+    }
+
+    // Re-calling with same idempotencyKey returns existing session without creating duplicate
+    const init2 = initiateServerPaymentSession({
+      user: student,
+      idempotencyKey,
+      referenceType: 'course',
+      courseId: course.id,
+      branchId: targetBranch.id,
+      gateway: 'bKash',
+    });
+    assert.equal(init2.ok, true);
+    if (init2.ok) {
+      assert.equal(init2.session.id, init1.session.id);
+    }
+
+    const webhookBodyObj = {
+      sessionId: init1.sandboxSignPayload.sessionId,
+      gateway: init1.sandboxSignPayload.gateway,
+      trxId: init1.sandboxSignPayload.trxId,
+      amount: init1.sandboxSignPayload.amount,
+      status: 'SUCCESS',
+    };
+    const rawBody = JSON.stringify(webhookBodyObj);
+
+    // Bad signature must be rejected with 401
+    const badWebhook = processSignedWebhookCallback({
+      gateway: 'bKash',
+      rawBody,
+      signature: 'invalid-hmac-signature',
+      payload: webhookBodyObj,
+    });
+    assert.equal(badWebhook.ok, false);
+    if (!badWebhook.ok) {
+      assert.equal(badWebhook.status, 401);
+    }
+
+    // Valid signature settles payment once
+    const validSig = computeWebhookSignature(rawBody, 'bKash');
+    const goodWebhook = processSignedWebhookCallback({
+      gateway: 'bKash',
+      rawBody,
+      signature: validSig,
+      payload: webhookBodyObj,
+    });
+    assert.equal(goodWebhook.ok, true);
+
+    // Replay is deduplicated without overwriting existing enrollment/transaction
+    const replayWebhook = processSignedWebhookCallback({
+      gateway: 'bKash',
+      rawBody,
+      signature: validSig,
+      payload: webhookBodyObj,
+    });
+    assert.equal(replayWebhook.ok, true);
+    if (replayWebhook.ok) {
+      assert.deepEqual(
+        (replayWebhook.result as { deduplicated?: boolean }).deduplicated,
+        true
+      );
+    }
+  });
+
+  test('idempotent payment session replay re-returns sandbox payload and wrong-amount webhook does not poison valid retry', () => {
+    const state = getDb();
+    const student = state.users.find((u) => u.role === 'student');
+    const targetBranch = state.branches.find((b) => b.status === 'active');
+    assert.ok(student);
+    assert.ok(targetBranch);
+
+    const ebook = state.ebooks.find((e) => !e.isFree && e.price > 0) ?? state.ebooks[0];
+    assert.ok(ebook);
+
+    const idemKey = `test-retry-idem-${crypto.randomBytes(6).toString('hex')}`;
+    const first = initiateServerPaymentSession({
+      user: student,
+      idempotencyKey: idemKey,
+      referenceType: 'ebook',
+      ebookId: ebook.id,
+      branchId: targetBranch.id,
+      gateway: 'Nagad',
+    });
+    assert.equal(first.ok, true);
+    if (!first.ok || !first.sandboxSignPayload) assert.fail('Expected sandboxSignPayload on first initiate');
+
+    // Replay same idempotencyKey while still initiated should still provide a valid sandboxSignPayload
+    const second = initiateServerPaymentSession({
+      user: student,
+      idempotencyKey: idemKey,
+      referenceType: 'ebook',
+      ebookId: ebook.id,
+      branchId: targetBranch.id,
+      gateway: 'Nagad',
+    });
+    assert.equal(second.ok, true);
+    if (!second.ok || !second.sandboxSignPayload) {
+      assert.fail('Expected sandboxSignPayload on idempotent initiate replay');
+    }
+    assert.equal(second.session.id, first.session.id);
+
+    // Send validly signed webhook with wrong amount and explicit eventId -> must return 400 and NOT poison eventId
+    const fixedEventId = `evt-${crypto.randomBytes(4).toString('hex')}`;
+    const underpaidBody = JSON.stringify({
+      sessionId: second.sandboxSignPayload.sessionId,
+      gateway: 'Nagad',
+      trxId: second.sandboxSignPayload.trxId,
+      amount: 1,
+      status: 'SUCCESS',
+      eventId: fixedEventId,
+    });
+    const underpaidSig = computeWebhookSignature(underpaidBody, 'Nagad');
+    const underpaidRes = processSignedWebhookCallback({
+      gateway: 'Nagad',
+      rawBody: underpaidBody,
+      signature: underpaidSig,
+      payload: JSON.parse(underpaidBody),
+    });
+    assert.equal(underpaidRes.ok, false);
+    if (!underpaidRes.ok) assert.equal(underpaidRes.status, 400);
+
+    // Now send exact matching amount with the same eventId -> must succeed
+    const validBody = JSON.stringify({
+      sessionId: second.sandboxSignPayload.sessionId,
+      gateway: 'Nagad',
+      trxId: second.sandboxSignPayload.trxId,
+      amount: second.sandboxSignPayload.amount,
+      status: 'SUCCESS',
+      eventId: fixedEventId,
+    });
+    const validSig = computeWebhookSignature(validBody, 'Nagad');
+    const validRes = processSignedWebhookCallback({
+      gateway: 'Nagad',
+      rawBody: validBody,
+      signature: validSig,
+      payload: JSON.parse(validBody),
+    });
+    assert.equal(validRes.ok, true);
+
+    // Re-calling initiate after verified settlement returns transaction idempotently
+    const third = initiateServerPaymentSession({
+      user: student,
+      idempotencyKey: idemKey,
+      referenceType: 'ebook',
+      ebookId: ebook.id,
+      branchId: targetBranch.id,
+      gateway: 'Nagad',
+    });
+    assert.equal(third.ok, true);
+    if (third.ok) {
+      assert.ok((third.result as { transaction?: { trxId?: string } })?.transaction?.trxId);
+    }
+  });
+
+  test('linked guardian can initiate payment for linked student fee invoice, unlinked cannot', () => {
+    const state = getDb();
+    const student = state.users.find((u) => u.role === 'student');
+    const branch = state.branches.find((b) => b.status === 'active');
+    assert.ok(student);
+    assert.ok(branch);
+
+    const invoiceId = `inv-test-${crypto.randomBytes(4).toString('hex')}`;
+    state.feeInvoices.unshift({
+      id: invoiceId,
+      invoiceNo: `FEE-TST-${Date.now()}`,
+      studentUserId: student.id,
+      studentName: student.name,
+      branchId: branch.id,
+      feeType: 'tuition',
+      title: 'Test Tuition Installment',
+      totalAmount: 1500,
+      paidAmount: 0,
+      dueAmount: 1500,
+      dueDate: '2026-12-31',
+      status: 'unpaid',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    saveDb(state);
+
+    const linkedGuardian = {
+      ...student,
+      id: 'u-guardian-linked-test',
+      role: 'guardian' as const,
+      guardianLinkedStudentIds: [student.id],
+    };
+    const unlinkedGuardian = {
+      ...student,
+      id: 'u-guardian-other-test',
+      role: 'guardian' as const,
+      guardianLinkedStudentIds: ['u-other-student'],
+    };
+
+    const denied = initiateServerPaymentSession({
+      user: unlinkedGuardian,
+      idempotencyKey: `inv-deny-${crypto.randomBytes(4).toString('hex')}`,
+      referenceType: 'invoice',
+      invoiceId,
+      branchId: branch.id,
+      gateway: 'bKash',
+    });
+    assert.equal(denied.ok, false);
+    if (!denied.ok) assert.equal(denied.status, 403);
+
+    const allowed = initiateServerPaymentSession({
+      user: linkedGuardian,
+      idempotencyKey: `inv-allow-${crypto.randomBytes(4).toString('hex')}`,
+      referenceType: 'invoice',
+      invoiceId,
+      branchId: branch.id,
+      gateway: 'bKash',
+    });
+    assert.equal(allowed.ok, true);
+    if (allowed.ok) assert.equal(allowed.session.amount, 1500);
+  });
+
+  test('backup restore recovers mutated data, normalizes legacy missing collections, and safe reset preserves admin credentials', () => {
+    const db = getDb();
+    const admin = db.users.find((u) => u.role === 'admin');
+    assert.ok(admin);
+    const originalCourseCount = db.courses.length;
+    const markerTitle = `Snapshot Restore Course ${Date.now()}`;
+    db.courses.unshift({
+      ...db.courses[0],
+      id: `c-snap-${Date.now()}`,
+      slug: `snap-${Date.now()}`,
+      title: markerTitle,
+    });
+    saveDb(db);
+
+    const snap = createVerifiedBackupSnapshot(db, admin.name, 'Full Restore Test Snapshot', 'manual');
+
+    // Strip a newer array from payload and recompute SHA to verify legacy snapshot compatibility
+    const parsedSnap = JSON.parse(snap.payloadJson!);
+    delete parsedSnap.paymentSessions;
+    delete parsedSnap.branchStatusHistory;
+    delete parsedSnap.communicationLogs;
+    snap.payloadJson = JSON.stringify(parsedSnap);
+    snap.checksumSha256 = crypto.createHash('sha256').update(snap.payloadJson).digest('hex');
+
+    // Tamper check must reject before mutation
+    const brokenId = `bkp-tamper-${Date.now()}`;
+    db.backups.unshift({ ...snap, id: brokenId, payloadJson: `${snap.payloadJson} ` });
+    const tamperRes = restoreBackupFromSnapshot(db, brokenId, admin);
+    assert.equal(tamperRes.ok, false);
+    if (!tamperRes.ok) assert.equal(tamperRes.status, 400);
+    db.backups.shift();
+
+    // Mutate live state (delete marker course)
+    db.courses = db.courses.filter((c) => c.title !== markerTitle);
+    saveDb(db);
+    assert.equal(getDb().courses.some((c) => c.title === markerTitle), false);
+
+    // Restore valid snapshot -> marker course is back & pre_restore snapshot created
+    const restored = restoreBackupFromSnapshot(getDb(), snap.id, admin);
+    assert.equal(restored.ok, true);
+    assert.equal(getDb().courses.some((c) => c.title === markerTitle), true);
+    assert.equal(getDb().courses.length, originalCourseCount + 1);
+    assert.ok(getDb().backups.some((b) => b.reason === 'pre_restore'));
+
+    // Safe system reset preserves admin login hash and creates verified pre_reset backup
+    const live = getDb();
+    const liveAdmin = live.users.find((u) => u.role === 'admin')!;
+    liveAdmin.passwordHash = hashPassword('AdminKeepPass99!');
+    liveAdmin.passwordUpdatedAt = new Date().toISOString();
+    liveAdmin.mustResetPassword = false;
+    saveDb(live);
+
+    const resetRes = safeSystemResetWithBackup(getDb(), liveAdmin);
+    assert.equal(resetRes.ok, true);
+    const afterReset = getDb();
+    assert.equal(afterReset.courses.some((c) => c.title === markerTitle), false);
+    const afterAdmin = afterReset.users.find((u) => u.role === 'admin')!;
+    assert.equal(verifyPassword('AdminKeepPass99!', afterAdmin.passwordHash), true);
+    assert.equal(afterAdmin.mustResetPassword, false);
+    assert.ok(afterReset.backups.some((b) => b.reason === 'pre_reset'));
+  });
+});

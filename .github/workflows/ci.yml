@@ -1,0 +1,49 @@
+name: CI & Release Verification
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  node-and-frontend:
+    name: TypeScript Lint, Unit Tests & Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - name: Run unit and integration tests
+        run: npx tsx --test src/lib/*.test.ts src/server/*.test.ts
+      - name: Verify installable Laravel ZIP archive hygiene
+        run: |
+          test -f public/downloads/academy-lms-laravel13.zip
+          unzip -t public/downloads/academy-lms-laravel13.zip
+          ! unzip -l public/downloads/academy-lms-laravel13.zip | grep -qE '(^|/)(\.env|storage/installed\.lock)'
+
+  laravel-production-suite:
+    name: Laravel 13 PHP 8.3 Feature & Security Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: laravel-system
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, pdo_sqlite, pdo_mysql, pdo_pgsql, zip, gd, xml, ctype, bcmath
+      - run: composer install --no-interaction --prefer-dist
+      - name: Prepare isolated testing environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          touch database/database.sqlite
+      - name: Run Laravel Feature & Unit Test Suite
+        run: php artisan test --stop-on-failure
