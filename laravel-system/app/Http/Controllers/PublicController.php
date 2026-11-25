@@ -268,6 +268,13 @@ class PublicController extends Controller
 
         $cleanTrx = strtoupper(trim($data['trx_id']));
         $settlement = DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
+            if (Enrollment::where('trx_id', $cleanTrx)
+                ->where('id', '!=', $enrollment->id)
+                ->exists()
+            ) {
+                return 'duplicate_trx';
+            }
+
             // The conditional status update is the atomic claim on this enrollment.
             // Concurrent callbacks can only move pending -> approved once.
             $updated = Enrollment::whereKey($enrollment->id)
@@ -283,13 +290,6 @@ class PublicController extends Controller
                 return $current->status === 'approved' ? 'deduplicated' : 'not_pending';
             }
 
-            if (Enrollment::where('trx_id', $cleanTrx)
-                ->where('id', '!=', $enrollment->id)
-                ->exists()
-            ) {
-                // Throwing rolls back the pending -> approved claim as well.
-                throw new \\DomainException('Duplicate Transaction ID rejected.');
-            }
 
             $settled = Enrollment::with(['course', 'user'])->findOrFail($enrollment->id);
             if ($settled->course) {
@@ -313,6 +313,9 @@ class PublicController extends Controller
         }
         if ($settlement === 'not_pending') {
             return response()->json(['error' => 'Enrollment is not awaiting payment.'], 409);
+        }
+        if ($settlement === 'duplicate_trx') {
+            return response()->json(['error' => 'Duplicate Transaction ID rejected.'], 409);
         }
 
         return response()->json(['ok' => true, 'enrollment_id' => $enrollment->id, 'status' => 'approved']);
