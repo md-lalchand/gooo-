@@ -294,7 +294,8 @@ class PublicController extends Controller
         }
 
         $cleanTrx = strtoupper(trim($data['trx_id']));
-        $settlement = DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
+        try {
+            $settlement = DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
             if (Enrollment::where('trx_id', $cleanTrx)
                 ->where('id', '!=', $enrollment->id)
                 ->exists()
@@ -333,7 +334,19 @@ class PublicController extends Controller
             ]);
 
             return 'approved';
-        });
+            });
+        } catch (\Illuminate\Database\QueryException $exception) {
+            // The database unique index is the final arbiter for two concurrent
+            // callbacks that race past the application-level duplicate check.
+            if (Enrollment::where('trx_id', $cleanTrx)
+                ->where('id', '!=', $enrollment->id)
+                ->exists()
+            ) {
+                $settlement = 'duplicate_trx';
+            } else {
+                throw $exception;
+            }
+        }
 
         if ($settlement === 'deduplicated') {
             return response()->json(['ok' => true, 'deduplicated' => true, 'enrollment_id' => $enrollment->id]);

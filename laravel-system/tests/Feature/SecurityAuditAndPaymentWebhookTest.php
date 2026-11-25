@@ -479,6 +479,38 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         )->assertOk()->assertJson(['ok' => true, 'deduplicated' => true]);
         $this->assertSame(1, $course->fresh()->enrolled_count);
 
+        // A provider transaction ID can settle only one enrollment. The route
+        // rejects a replay for another enrollment and the DB index protects races.
+        $secondEnrollment = Enrollment::create([
+            'user_id' => $student->id,
+            'course_id' => $course->id,
+            'branch_id' => $branch->id,
+            'payment_method' => 'Online Card / Gateway',
+            'trx_id' => null,
+            'invoice_no' => 'INV-SECOND-UNIQUE-TRX',
+            'amount_paid' => 4500,
+            'status' => 'pending',
+            'completed_lesson_ids' => [],
+        ]);
+        $duplicatePayload = json_encode([
+            'enrollment_id' => $secondEnrollment->id,
+            'trx_id' => 'TRX-BKASH-7788',
+            'amount' => 4500,
+            'status' => 'SUCCESS',
+        ]);
+        $duplicateSignature = hash_hmac('sha256', (string) $duplicatePayload, $secret);
+        $this->call(
+            'POST',
+            '/payments/webhook/gw-online',
+            [],
+            [],
+            [],
+            ['HTTP_X_WEBHOOK_SIGNATURE' => $duplicateSignature, 'CONTENT_TYPE' => 'application/json'],
+            (string) $duplicatePayload
+        )->assertStatus(409)->assertJson(['error' => 'Duplicate Transaction ID rejected.']);
+
+        $this->assertSame('pending', $secondEnrollment->fresh()->status);
+
         // Paid e-book cannot be claimed without trx_id
         $paidEbook = Ebook::create([
             'title' => 'Premium IELTS Essays',
