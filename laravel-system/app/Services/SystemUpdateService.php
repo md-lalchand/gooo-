@@ -329,15 +329,66 @@ class SystemUpdateService
         }
 
         $entries = [];
+        $seenPaths = [];
+        $totalUncompressedBytes = 0;
         try {
+            if ($zip->numFiles < 1 || $zip->numFiles > 10000) {
+                throw new RuntimeException('Update archive contains an invalid number of entries.');
+            }
+
             for ($i = 0; $i < $zip->numFiles; $i++) {
                 $stat = $zip->statIndex($i);
-                $name = str_replace('\\', '/', (string) ($stat['name'] ?? ''));
-                if ($name === '' || str_ends_with($name, '/')) {
-                    continue;
+                if (!is_array($stat)) {
+                    throw new RuntimeException('Unable to inspect an update archive entry.');
                 }
-                if (str_contains($name, '..') || str_contains($name, "\0") || str_starts_with($name, '/') || preg_match('/^[A-Za-z]:/', $name)) {
-                    throw new RuntimeException("Unsafe path detected inside update archive: {$name}");
+
+                $rawName = (string) ($stat['name'] ?? '');
+                $name = str_replace('\\', '/', $rawName);
+                $trimmedName = rtrim($name, '/');
+                if ($trimmedName === '' || str_contains($name, "\0") || preg_match('/[\x00-\x1F\x7F]/', $name)
+                    || str_starts_with($name, '/') || preg_match('/^[A-Za-z]:/', $name)
+                ) {
+                    throw new RuntimeException('Unsafe path detected inside update archive.');
+                }
+
+                foreach (explode('/', $trimmedName) as $segment) {
+                    if ($segment === '' || $segment === '.' || $segment === '..') {
+                        throw new RuntimeException("Unsafe path detected inside update archive: {$name}");
+                    }
+                }
+
+                $opsys = 0;
+                $attributes = 0;
+                if ($zip->getExternalAttributesIndex($i, $opsys, $attributes)
+                    && $opsys === ZipArchive::OPSYS_UNIX
+                ) {
+                    $fileType = ($attributes >> 16) & 0170000;
+                    if ($fileType === 0120000) {
+                        throw new RuntimeException("Symbolic links are not allowed in update archives: {$name}");
+                    }
+                }
+
+                if (isset($stat['encryption_method']) && (int) $stat['encryption_method'] !== 0) {
+                    throw new RuntimeException("Encrypted update archive entries are not supported: {$name}");
+                }
+
+                $size = (int) ($stat['size'] ?? 0);
+                if ($size < 0 || $size > 50 * 1024 * 1024) {
+                    throw new RuntimeException("Update archive entry exceeds the allowed uncompressed size: {$name}");
+                }
+                $totalUncompressedBytes += $size;
+                if ($totalUncompressedBytes > 250 * 1024 * 1024) {
+                    throw new RuntimeException('Update archive exceeds the 250 MB uncompressed size limit.');
+                }
+
+                $normalizedName = rtrim($name, '/');
+                if (isset($seenPaths[$normalizedName])) {
+                    throw new RuntimeException("Duplicate path detected inside update archive: {$normalizedName}");
+                }
+                $seenPaths[$normalizedName] = true;
+
+                if (str_ends_with($name, '/')) {
+                    continue;
                 }
                 $entries[] = $name;
             }
@@ -383,6 +434,7 @@ class SystemUpdateService
             'updatable_files' => $updatable,
             'protected_skipped' => $protectedSkipped,
             'checksum_sha256' => hash_file('sha256', $zipPath),
+            'total_uncompressed_bytes' => $totalUncompressedBytes,
         ];
     }
 
