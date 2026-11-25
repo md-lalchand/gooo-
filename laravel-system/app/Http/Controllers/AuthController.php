@@ -194,11 +194,17 @@ class AuthController extends Controller
 
         $user = User::where('email', strtolower(trim($data['email'])))->first();
         if ($user && (empty($data['expected_role']) || $user->role === $data['expected_role'])) {
-            $rawToken = strtoupper(bin2hex(random_bytes(5)));
+            $rawToken = strtoupper(bin2hex(random_bytes(32)));
             $user->update([
                 'password_reset_token_hash' => hash('sha256', $rawToken),
                 'password_reset_expires_at' => now()->addHour(),
             ]);
+
+            try {
+                $user->notify(new PasswordRecoveryToken($rawToken));
+            } catch (\\Throwable $exception) {
+                report($exception);
+            }
         }
 
         return redirect()
