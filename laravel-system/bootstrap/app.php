@@ -19,6 +19,20 @@ return Application::configure(basePath: dirname(__DIR__))
             'trim',
             explode(',', (string) env('TRUSTED_PROXIES', ''))
         )));
+        foreach ($trustedProxies as $proxy) {
+            if (in_array($proxy, ['*', '0.0.0.0/0', '::/0'], true)) {
+                throw new \\RuntimeException('TRUSTED_PROXIES must not contain a wildcard or unrestricted network range.');
+            }
+            $parts = explode('/', $proxy, 2);
+            $ipVersion = filter_var($parts[0], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false ? 4
+                : (filter_var($parts[0], FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false ? 6 : 0);
+            $maxPrefix = $ipVersion === 4 ? 32 : 128;
+            if ($ipVersion === 0
+                || (isset($parts[1]) && (!ctype_digit($parts[1]) || (int) $parts[1] > $maxPrefix))
+            ) {
+                throw new \\RuntimeException('TRUSTED_PROXIES must contain valid IP addresses or CIDR ranges.');
+            }
+        }
         if ($trustedProxies !== []) {
             $middleware->trustProxies(at: $trustedProxies);
         }
