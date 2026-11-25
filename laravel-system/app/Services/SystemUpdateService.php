@@ -202,9 +202,9 @@ class SystemUpdateService
                 'created_by' => $actorName,
                 'table_counts' => $counts,
                 'table_hashes' => $tableHashes,
-                'table_files' => array_fill_keys(
+                'table_files' => array_combine(
                     array_keys($counts),
-                    'database/tables'
+                    array_map(static fn ($table) => "database/tables/{$table}.ndjson", array_keys($counts))
                 ),
             ];
             $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR);
@@ -682,6 +682,31 @@ class SystemUpdateService
         @chmod($destination, 0600);
     }
 
+    private function assertPortableArchiveMatchesSnapshot(array $manifest, BackupSnapshot $snapshot): void
+    {
+        $metadata = json_decode((string) $snapshot->payload_json, true);
+        if (!is_array($metadata)) {
+            throw new RuntimeException('Portable archive database metadata is invalid.');
+        }
+        if (!isset($manifest['entries']['database.json'])
+            || !hash_equals(hash('sha256', (string) $snapshot->payload_json), (string) $manifest['entries']['database.json'])
+        ) {
+            throw new RuntimeException('Portable archive database metadata does not match the stored snapshot.');
+        }
+
+        if (($metadata['format'] ?? null) === 'lms-full-backup-v2-streamed') {
+            foreach (($metadata['table_hashes'] ?? []) as $table => $expectedHash) {
+                $entry = "database/tables/{$table}.ndjson";
+                if (!is_string($expectedHash)
+                    || !isset($manifest['entries'][$entry])
+                    || !hash_equals($expectedHash, (string) $manifest['entries'][$entry])
+                ) {
+                    throw new RuntimeException("Portable archive table manifest mismatch for {$table}.");
+                }
+            }
+        }
+    }
+
     public function verifyPortableBackupArchive(BackupSnapshot $snapshot): void
     {
         $this->verifyBackupSnapshot($snapshot);
@@ -695,6 +720,7 @@ class SystemUpdateService
         }
         try {
             $manifest = $this->readAndVerifyPortableBackupManifest($zip, $snapshot);
+            $this->assertPortableArchiveMatchesSnapshot($manifest, $snapshot);
             foreach ($manifest['entries'] as $name => $expectedHash) {
                 if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
                     || str_contains($name, '\\') || !is_string($expectedHash)
@@ -724,6 +750,7 @@ class SystemUpdateService
         }
         try {
             $manifest = $this->readAndVerifyPortableBackupManifest($zip, $snapshot);
+            $this->assertPortableArchiveMatchesSnapshot($manifest, $snapshot);
             foreach ($manifest['entries'] as $name => $expectedHash) {
                 if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
                     || str_contains($name, '\\') || !is_string($expectedHash)
