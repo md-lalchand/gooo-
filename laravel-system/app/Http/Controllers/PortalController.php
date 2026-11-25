@@ -123,7 +123,19 @@ class PortalController extends Controller
         }
 
         if ($role === 'branch') {
-            $batches = Batch::where('branch_id', $user->branch_id)->with(['course', 'branch'])->latest()->get();
+            if (!$user->branch_id) {
+                abort(403, 'Branch account is not assigned to a branch.');
+            }
+
+            $branchBatchIds = Batch::where('branch_id', $user->branch_id)->pluck('id');
+            $branchCourseIds = Batch::whereIn('id', $branchBatchIds)->distinct()->pluck('course_id');
+            $branches = Branch::whereKey($user->branch_id)->get();
+            $courses = Course::whereIn('id', $branchCourseIds)->latest()->get();
+            $batches = Batch::whereIn('id', $branchBatchIds)->with(['course', 'branch'])->latest()->get();
+            $lessons = Lesson::where(function ($query) use ($branchBatchIds, $branchCourseIds) {
+                $query->whereIn('batch_id', $branchBatchIds)->orWhereIn('course_id', $branchCourseIds);
+            })->with(['course', 'batch'])->orderBy('order_index')->get();
+            $exams = Exam::whereIn('course_id', $branchCourseIds)->with('questions')->get();
             $enrollments = Enrollment::where('branch_id', $user->branch_id)->with(['user', 'course'])->latest()->get();
             $users = User::where('branch_id', $user->branch_id)->get();
             $orders = Order::where('branch_pickup_id', $user->branch_id)->with('user')->latest()->get();
@@ -133,18 +145,40 @@ class PortalController extends Controller
             $academicYears = AcademicYear::latest()->get();
             $academicClasses = AcademicClass::latest()->get();
             return view('portal.index', compact(
-                'user', 'branches', 'courses', 'batches', 'users', 'enrollments',
+                'user', 'branches', 'courses', 'batches', 'lessons', 'exams', 'users', 'enrollments',
                 'orders', 'attendance', 'admissions', 'feeInvoices', 'academicYears',
                 'academicClasses', 'notifications'
             ));
         }
 
         if ($role === 'teacher') {
+            $teacherBatchIds = Batch::where(function ($query) use ($user) {
+                $query->where('main_teacher_id', $user->id)
+                    ->orWhere('assistant_teacher_id', $user->id)
+                    ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $user->id));
+            })->pluck('id');
+            $teacherCourseIds = Batch::whereIn('id', $teacherBatchIds)->distinct()->pluck('course_id')
+                ->merge(Exam::where('teacher_id', $user->id)->pluck('course_id'))
+                ->merge(CourseAssignment::where('created_by', $user->id)->pluck('course_id'))
+                ->filter()->unique()->values();
+            $teacherBranchIds = Batch::whereIn('id', $teacherBatchIds)->whereNotNull('branch_id')->distinct()->pluck('branch_id');
+
+            $branches = Branch::whereIn('id', $teacherBranchIds)->get();
+            $courses = Course::whereIn('id', $teacherCourseIds)->latest()->get();
+            $batches = Batch::whereIn('id', $teacherBatchIds)->with(['course', 'branch'])->latest()->get();
+            $lessons = Lesson::where(function ($query) use ($teacherBatchIds, $teacherCourseIds) {
+                $query->whereIn('batch_id', $teacherBatchIds)->orWhereIn('course_id', $teacherCourseIds);
+            })->with(['course', 'batch'])->orderBy('order_index')->get();
+            $exams = Exam::where('teacher_id', $user->id)->orWhereIn('course_id', $teacherCourseIds)->with('questions')->get();
             $questionBank = QuestionBankItem::latest()->get();
-            $courseModules = CourseModule::with(['course', 'chapters'])->orderBy('order_index')->get();
-            $assignments = CourseAssignment::with(['course', 'submissions.user'])->latest()->get();
-            $courseAnnouncements = CourseAnnouncement::with(['course', 'author'])->latest()->get();
-            $scormPackages = ScormPackage::with('course')->latest()->get();
+            $courseModules = CourseModule::whereIn('course_id', $teacherCourseIds)->with(['course', 'chapters'])->orderBy('order_index')->get();
+            $assignments = CourseAssignment::where(function ($query) use ($teacherCourseIds, $teacherBatchIds, $user) {
+                $query->whereIn('course_id', $teacherCourseIds)
+                    ->orWhereIn('batch_id', $teacherBatchIds)
+                    ->orWhere('created_by', $user->id);
+            })->with(['course', 'submissions.user'])->latest()->get();
+            $courseAnnouncements = CourseAnnouncement::whereIn('course_id', $teacherCourseIds)->with(['course', 'author'])->latest()->get();
+            $scormPackages = ScormPackage::whereIn('course_id', $teacherCourseIds)->with('course')->latest()->get();
             return view('portal.index', compact(
                 'user', 'branches', 'courses', 'batches', 'lessons', 'exams',
                 'questionBank', 'courseModules', 'assignments', 'courseAnnouncements',
