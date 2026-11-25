@@ -323,7 +323,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
 
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
@@ -405,7 +405,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         // Bad signature returns 401
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
@@ -425,13 +425,26 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $mismatchSig = hash_hmac('sha256', (string) $mismatchPayload, $secret);
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
             ['HTTP_X_WEBHOOK_SIGNATURE' => $mismatchSig, 'CONTENT_TYPE' => 'application/json'],
             (string) $mismatchPayload
         )->assertStatus(400);
+
+        // A valid signature cannot settle an enrollment through a different gateway route.
+        $wrongGatewaySig = hash_hmac('sha256', (string) $badPayload, $secret);
+        $this->call(
+            'POST',
+            '/payments/webhook/bkash',
+            [],
+            [],
+            [],
+            ['HTTP_X_WEBHOOK_SIGNATURE' => $wrongGatewaySig, 'CONTENT_TYPE' => 'application/json'],
+            (string) $badPayload
+        )->assertStatus(404)->assertJson(['error' => 'Payment gateway is not active or does not accept webhooks.']);
+        $this->assertSame('pending', $enrollment->fresh()->status);
 
         // Valid signature & matching amount approves enrollment and deduplicates replays
         $goodPayload = json_encode([
@@ -443,7 +456,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $goodSig = hash_hmac('sha256', (string) $goodPayload, $secret);
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
@@ -457,7 +470,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         // Replay is deduplicated without double counting
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
@@ -529,7 +542,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
 
         $this->call(
             'POST',
-            '/payments/webhook/bkash',
+            '/payments/webhook/gw-online',
             [],
             [],
             [],
