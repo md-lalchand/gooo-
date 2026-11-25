@@ -9,6 +9,8 @@ use App\Models\Course;
 use App\Models\CourseAssignment;
 use App\Models\CourseModule;
 use App\Models\Enrollment;
+use App\Models\Exam;
+use App\Models\Lesson;
 use App\Models\ScormPackage;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -236,6 +238,107 @@ class TeacherCourseAccessTest extends TestCase
             ->assertRedirect();
 
         $this->assertDatabaseHas('scorm_attempts', ['scorm_package_id' => $package->id, 'user_id' => $student->id]);
+    }
+
+
+    public function test_students_only_see_and_complete_lessons_assignments_and_exams_for_their_enrolled_batch(): void
+    {
+        $branch = $this->makeBranch('Student Branch', 'STU');
+        $teacherA = $this->makeUser('teacher', $branch->id, 'batch.teacher.a@example.test');
+        $teacherB = $this->makeUser('teacher', $branch->id, 'batch.teacher.b@example.test');
+        $student = $this->makeUser('student', $branch->id, 'batch.student@example.test');
+        $course = $this->makeCourse('Shared Course');
+        $batchA = $this->makeBatch($course, $branch, $teacherA, 'STUDENT-A');
+        $batchB = $this->makeBatch($course, $branch, $teacherB, 'STUDENT-B');
+
+        $sharedLesson = Lesson::create([
+            'course_id' => $course->id,
+            'lesson_type' => 'recorded',
+            'title' => 'Shared Course Lesson',
+            'module_name' => 'Shared Module',
+            'duration' => '20 min',
+        ]);
+        $lessonA = Lesson::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchA->id,
+            'lesson_type' => 'recorded',
+            'title' => 'Batch A Private Lesson',
+            'module_name' => 'Batch A Module',
+            'duration' => '20 min',
+        ]);
+        $lessonB = Lesson::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchB->id,
+            'lesson_type' => 'recorded',
+            'title' => 'Batch B Private Lesson',
+            'module_name' => 'Batch B Module',
+            'duration' => '20 min',
+        ]);
+
+        $assignmentA = CourseAssignment::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchA->id,
+            'title' => 'Batch A Assignment',
+            'instructions' => 'Only Batch A students.',
+            'max_marks' => 100,
+            'created_by' => $teacherA->id,
+        ]);
+        $assignmentB = CourseAssignment::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchB->id,
+            'title' => 'Batch B Assignment',
+            'instructions' => 'Only Batch B students.',
+            'max_marks' => 100,
+            'created_by' => $teacherB->id,
+        ]);
+
+        $enrollment = Enrollment::create([
+            'user_id' => $student->id,
+            'course_id' => $course->id,
+            'branch_id' => $branch->id,
+            'batch_id' => $batchA->id,
+            'payment_method' => 'cash',
+            'amount_paid' => 2000,
+            'status' => 'approved',
+            'completed_lesson_ids' => [$lessonB->id],
+        ]);
+
+        $examA = Exam::create(['course_id' => $course->id, 'title' => 'Batch A Exam', 'category' => 'Test']);
+        $examB = Exam::create(['course_id' => $course->id, 'title' => 'Batch B Exam', 'category' => 'Test']);
+        $globalExam = Exam::create(['title' => 'General Exam', 'category' => 'General']);
+
+        $learn = $this->actingAs($student)->get(route('learn'))->assertOk();
+        $learn->assertSee('Shared Course Lesson')
+            ->assertSee('Batch A Private Lesson')
+            ->assertDontSee('Batch B Private Lesson')
+            ->assertSee('Batch A Assignment')
+            ->assertDontSee('Batch B Assignment')
+            ->assertDontSee('STUDENT-B Batch');
+
+        $this->actingAs($student)
+            ->post(route('learn.progress'), ['course_id' => $course->id, 'lesson_id' => $lessonB->id])
+            ->assertNotFound();
+
+        $this->actingAs($student)
+            ->post(route('learn.assignments.submit', $assignmentB), [
+                'submission_text' => 'Attempt from another batch',
+            ])->assertForbidden();
+
+        $this->actingAs($student)
+            ->post(route('learn.certificate.claim', $course))
+            ->assertSessionHasErrors('certificate');
+
+        $examIndex = $this->actingAs($student)->get(route('exams.index'))->assertOk();
+        $examIndex->assertViewHas('exams', fn ($exams) => $exams->contains('id', $examA->id)
+            && $exams->contains('id', $globalExam->id)
+            && !$exams->contains('id', $examB->id));
+
+        $this->actingAs($student)
+            ->post(route('exams.submit', $examB), ['answers' => []])
+            ->assertForbidden();
+
+        $this->assertSame([$lessonB->id], $enrollment->fresh()->completed_lesson_ids);
+        $this->assertDatabaseHas('course_assignments', ['id' => $assignmentA->id]);
     }
 
     private function makeBranch(string $name, string $code): Branch
