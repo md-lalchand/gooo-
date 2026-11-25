@@ -15,6 +15,7 @@ use App\Services\SystemUpdateService;
 use App\Support\BrandSettings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
@@ -546,6 +547,29 @@ PHP
         $this->cleanupFiles[] = $restored['environment_restore_path'];
         $this->assertDatabaseHas('users', ['email' => 'snapshot-student@example.test']);
         $this->assertDatabaseMissing('users', ['email' => 'after-snapshot@example.test']);
+    }
+
+    public function test_portable_backup_captures_plugin_tables_not_in_the_builtin_allowlist(): void
+    {
+        Schema::create('plugin_custom_data', function (\Illuminate\Database\Schema\Blueprint $table) {
+            $table->id();
+            $table->string('payload');
+        });
+        DB::table('plugin_custom_data')->insert(['payload' => 'must-survive-restore']);
+
+        try {
+            $service = app(SystemUpdateService::class);
+            $snapshot = $service->createFullBackup('Backup Admin', 'Dynamic table coverage')['snapshot'];
+            DB::table('plugin_custom_data')->delete();
+
+            $service->restoreBackupSnapshot($snapshot, 'Backup Admin', false);
+
+            $this->assertDatabaseHas('plugin_custom_data', ['payload' => 'must-survive-restore']);
+            $payload = json_decode((string) $snapshot->payload_json, true);
+            $this->assertArrayHasKey('plugin_custom_data', $payload['tables'] ?? []);
+        } finally {
+            Schema::dropIfExists('plugin_custom_data');
+        }
     }
 
     private function removeDirectoryRecursive(string $dir): void
