@@ -379,13 +379,177 @@ class SystemUpdateService
         ];
     }
 
-    public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName): array
+    public function restorePortableBackup(BackupSnapshot $snapshot, string $actorName): array
+    {
+        $this->verifyBackupSnapshot($snapshot);
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        if (!is_file($archivePath) || !class_exists(ZipArchive::class)) {
+            throw new RuntimeException('Verified portable backup archive is missing or ZIP support is unavailable.');
+        }
+
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Unable to open portable backup archive.');
+        }
+        $manifestJson = $zip->getFromName('manifest.json');
+        $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
+        if (!is_array($manifest)
+            || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
+            || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+            || !is_array($manifest['entries'] ?? null)
+        ) {
+            $zip->close();
+            throw new RuntimeException('Portable backup manifest is invalid.');
+        }
+
+        $verifiedEntries = [];
+        foreach ($manifest['entries'] as $name => $expectedHash) {
+            if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
+                || str_contains($name, '\\') || !is_string($expectedHash)
+            ) {
+                $zip->close();
+                throw new RuntimeException('Portable backup contains an unsafe entry path.');
+            }
+            $content = $zip->getFromName($name);
+            if (!is_string($content) || !hash_equals($expectedHash, hash('sha256', $content))) {
+                $zip->close();
+                throw new RuntimeException("Portable backup checksum verification failed for {$name}.");
+            }
+            $verifiedEntries[$name] = $content;
+        }
+        if (($verifiedEntries['database.json'] ?? null) !== (string) $snapshot->payload_json
+            || !isset($verifiedEntries['environment/.env.encrypted'])
+        ) {
+            $zip->close();
+            throw new RuntimeException('Portable archive does not match the verified database snapshot.');
+        }
+        try {
+            $environmentContents = Crypt::decryptString($verifiedEntries['environment/.env.encrypted']);
+        } catch (\Throwable $exception) {
+            $zip->close();
+            throw new RuntimeException('Encrypted environment backup cannot be decrypted with the current application key.', 0, $exception);
+        }
+        $zip->close();
+
+        $stagingRoot = storage_path('app/restore-staging-' . $snapshot->id . '-' . bin2hex(random_bytes(4)));
+        $rollbackRoot = storage_path('app/restore-rollback-' . $snapshot->id . '-' . bin2hex(random_bytes(4)));
+        $targets = [
+            'storage-app-public' => storage_path('app/public'),
+            'public-uploads' => public_path('uploads'),
+            'data-uploads' => base_path('data/uploads'),
+        ];
+        $staged = [];
+        foreach ($targets as $rootName => $targetPath) {
+            $stagePath = $stagingRoot . DIRECTORY_SEPARATOR . $rootName;
+            if (!mkdir($stagePath, 0700, true) && !is_dir($stagePath)) {
+                throw new RuntimeException('Unable to prepare upload restore staging directory.');
+            }
+            $prefix = 'uploads/' . $rootName . '/';
+            foreach ($verifiedEntries as $name => $content) {
+                if (!str_starts_with($name, $prefix) || str_ends_with($name, '/.backup-root')) {
+                    continue;
+                }
+                $relative = substr($name, strlen($prefix));
+                $segments = explode('/', $relative);
+                if ($relative === '' || in_array('', $segments, true) || in_array('.', $segments, true) || in_array('..', $segments, true)) {
+                    throw new RuntimeException('Unsafe upload restore path detected.');
+                }
+                $destination = $stagePath . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $segments);
+                $directory = dirname($destination);
+                if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+                    throw new RuntimeException('Unable to create upload restore directory.');
+                }
+                if (file_put_contents($destination, $content, LOCK_EX) === false) {
+                    throw new RuntimeException('Unable to stage an upload file for restore.');
+                }
+            }
+            $staged[$rootName] = ['stage' => $stagePath, 'target' => $targetPath];
+        }
+
+        $environmentRestorePath = storage_path('app/backups/restored-environment-' . $snapshot->id . '.env');
+        $envTemp = $environmentRestorePath . '.tmp';
+        if (file_put_contents($envTemp, $environmentContents, LOCK_EX) === false || !rename($envTemp, $environmentRestorePath)) {
+            @unlink($envTemp);
+            throw new RuntimeException('Unable to write the decrypted environment restore copy.');
+        }
+        @chmod($environmentRestorePath, 0600);
+
+        $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before portable restore #{$snapshot->id})");
+        $swapped = [];
+        try {
+            foreach ($staged as $rootName => $paths) {
+                $target = $paths['target'];
+                if (is_link($target)) {
+                    throw new RuntimeException("Refusing to overwrite symlinked upload directory: {$rootName}");
+                }
+                $rollback = $rollbackRoot . DIRECTORY_SEPARATOR . $rootName;
+                if (is_dir($target)) {
+                    if (!is_dir(dirname($rollback)) && !mkdir(dirname($rollback), 0700, true) && !is_dir(dirname($rollback))) {
+                        throw new RuntimeException('Unable to prepare upload rollback directory.');
+                    }
+                    if (!rename($target, $rollback)) {
+                        throw new RuntimeException("Unable to preserve current upload directory: {$rootName}");
+                    }
+                }
+                $swapped[$rootName] = ['target' => $target, 'rollback' => $rollback, 'had_target' => is_dir($rollback)];
+                if (!is_dir(dirname($target)) && !mkdir(dirname($target), 0755, true) && !is_dir(dirname($target))) {
+                    throw new RuntimeException('Unable to prepare upload destination directory.');
+                }
+                if (!rename($paths['stage'], $target)) {
+                    throw new RuntimeException("Unable to activate restored upload directory: {$rootName}");
+                }
+                @chmod($target, 0750);
+            }
+            $restoredCounts = $this->restoreBackupSnapshot($snapshot, $actorName, false);
+        } catch (\Throwable $exception) {
+            foreach (array_reverse($swapped) as $swap) {
+                if (is_dir($swap['target'])) {
+                    $this->removeDirectoryTree($swap['target']);
+                }
+                if ($swap['had_target'] && is_dir($swap['rollback'])) {
+                    @rename($swap['rollback'], $swap['target']);
+                }
+            }
+            $this->removeDirectoryTree($stagingRoot);
+            throw new RuntimeException('Portable restore failed; upload directories were rolled back. ' . $exception->getMessage(), 0, $exception);
+        }
+
+        $this->removeDirectoryTree($stagingRoot);
+        $this->removeDirectoryTree($rollbackRoot);
+        return [
+            'table_counts' => $restoredCounts,
+            'environment_restore_path' => $environmentRestorePath,
+        ];
+    }
+
+    private function removeDirectoryTree(string $path): void
+    {
+        if (!is_dir($path) || is_link($path)) {
+            return;
+        }
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterator as $item) {
+            if ($item->isDir() && !$item->isLink()) {
+                @rmdir($item->getPathname());
+            } else {
+                @unlink($item->getPathname());
+            }
+        }
+        @rmdir($path);
+    }
+
+    public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName, bool $createSafetyBackup = true): array
     {
         $verified = $this->verifyBackupSnapshot($snapshot);
         $tablesData = $verified['tables'];
 
         // Preserve the current live state before any destructive restore work.
-        $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
+        if ($createSafetyBackup) {
+            $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
+        }
 
         $restoredCounts = [];
         DB::transaction(function () use ($tablesData, &$restoredCounts) {
