@@ -9,8 +9,8 @@
 
     @forelse($enrollments as $enr)
         @php
-            $completedIds = $enr->completed_lesson_ids ?? [];
-            $totalLessons = max(1, $enr->course->lessons->count());
+            $completedIds = $enr->accessible_completed_lesson_ids ?? [];
+            $totalLessons = max(1, $enr->accessible_lessons->count());
             $progressPct = $enr->course->lessons->count() > 0 ? (int) round((count($completedIds) / $totalLessons) * 100) : 0;
             $courseCert = ($earnedCertificates ?? collect())->get($enr->course_id);
         @endphp
@@ -51,7 +51,7 @@
                 </div>
             @endif
 
-            @if($enr->course->batches->count())
+            @if($enr->accessible_batches->count())
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     @foreach($enr->course->batches as $bat)
                         <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
@@ -101,7 +101,7 @@
                 @endforelse
             </div>
 
-            @if($enr->course->assignments->count())
+            @if($enr->accessible_assignments->count())
                 <div class="border-t border-slate-100 pt-4 space-y-3">
                     <h3 class="text-sm font-extrabold text-slate-900">Assignments ({{ $enr->course->assignments->count() }})</h3>
                     @foreach($enr->course->assignments as $asg)
@@ -131,7 +131,7 @@
                 </div>
             @endif
 
-            @if($enr->course->scormPackages->count())
+            @if($enr->accessible_scorm_packages->count())
                 <div class="border-t border-slate-100 pt-4 space-y-2">
                     <h3 class="text-sm font-extrabold text-slate-900">Interactive SCORM Activities</h3>
                     @foreach($enr->course->scormPackages as $pkg)
