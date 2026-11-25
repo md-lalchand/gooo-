@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 use PDO;
 
 class InstallController extends Controller
@@ -22,6 +23,7 @@ class InstallController extends Controller
             'php_8_3_plus' => version_compare(PHP_VERSION, '8.3.0', '>='),
             'pdo_sqlite' => extension_loaded('pdo_sqlite'),
             'pdo_mysql' => extension_loaded('pdo_mysql'),
+            'pdo_pgsql' => extension_loaded('pdo_pgsql'),
             'zip_archive' => extension_loaded('zip'),
             'mbstring' => extension_loaded('mbstring'),
             'openssl' => extension_loaded('openssl'),
@@ -51,21 +53,54 @@ class InstallController extends Controller
             'accent_color' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/',
             'logo_file' => 'nullable|file|mimes:png,jpg,jpeg,webp,svg|max:4096',
             'db_connection' => 'required|in:sqlite,mysql,pgsql',
-            'db_host' => 'nullable|string|max:120',
+            'db_host' => 'nullable|string|max:120|regex:/^[A-Za-z0-9.:-]+$/',
             'db_port' => 'nullable|numeric',
             'db_database' => 'required|string|max:180',
             'db_username' => 'nullable|string|max:120',
             'db_password' => 'nullable|string|max:200',
             'db_sslmode' => 'nullable|in:disable,prefer,require,verify-ca,verify-full',
+            'db_sslrootcert' => 'nullable|string|max:500|not_regex:/[;\r\n]/',
+            'db_ssl_ca' => 'nullable|string|max:500|not_regex:/[;\r\n]/',
             'admin_name' => 'required|string|max:120',
             'admin_email' => 'required|email|max:140',
-            'admin_password' => 'required|string|min:8',
+            'admin_password' => ['required', 'string', Password::min(12)->mixedCase()->numbers()->symbols()],
         ]);
 
         $driver = $data['db_connection'];
         $dbDatabaseValue = trim($data['db_database']);
-        $sslMode = (string) ($data['db_sslmode'] ?? 'prefer');
+        if ($driver !== 'sqlite' && !preg_match('/^[A-Za-z0-9_.-]+$/', $dbDatabaseValue)) {
+            return back()->withInput()->withErrors(['db_database' => 'Database names may contain only letters, numbers, dots, underscores, and hyphens.']);
+        }
+        $sslMode = (string) ($data['db_sslmode'] ?? 'require');
+        $sslRootCert = trim((string) ($data['db_sslrootcert'] ?? ''));
+        $mysqlSslCa = trim((string) ($data['db_ssl_ca'] ?? ''));
         $isHttps = str_starts_with(strtolower(trim($data['app_url'])), 'https://');
+
+        if ($driver === 'mysql' && !extension_loaded('pdo_mysql')) {
+            return back()->withInput()->withErrors(['db' => 'The PDO MySQL extension is required for this database driver.']);
+        }
+        if ($driver === 'pgsql' && !extension_loaded('pdo_pgsql')) {
+            return back()->withInput()->withErrors(['db' => 'The PDO PostgreSQL extension is required for this database driver.']);
+        }
+        if ($driver === 'pgsql' && in_array($sslMode, ['verify-ca', 'verify-full'], true)) {
+            if ($sslRootCert === '' || !is_file($sslRootCert) || !is_readable($sslRootCert)) {
+                return back()->withInput()->withErrors(['db_sslrootcert' => 'A readable PostgreSQL CA certificate file is required for verify-ca / verify-full mode.']);
+            }
+        }
+
+        if ($driver === 'mysql') {
+            $hostForTls = strtolower(trim((string) ($data['db_host'] ?? '127.0.0.1')));
+            $isLocalDatabase = in_array($hostForTls, ['localhost', '127.0.0.1', '::1'], true);
+            if ($mysqlSslCa !== '' && (!is_file($mysqlSslCa) || !is_readable($mysqlSslCa))) {
+                return back()->withInput()->withErrors(['db_ssl_ca' => 'The MySQL CA certificate path must point to a readable file.']);
+            }
+            if (!$isLocalDatabase && $sslMode === 'disable') {
+                return back()->withInput()->withErrors(['db_sslmode' => 'TLS cannot be disabled for a remote MySQL database in production.']);
+            }
+            if (!$isLocalDatabase && $mysqlSslCa === '') {
+                return back()->withInput()->withErrors(['db_ssl_ca' => 'A readable MySQL CA certificate file is required to verify a remote MySQL database host.']);
+            }
+        }
 
         if ($driver === 'sqlite') {
             $sqlitePath = str_starts_with($dbDatabaseValue, '/')
@@ -95,9 +130,14 @@ class InstallController extends Controller
 
             try {
                 $dsn = $driver === 'pgsql'
-                    ? "pgsql:host={$host};port={$port};dbname={$dbDatabaseValue};sslmode={$sslMode}"
+                    ? "pgsql:host={$host};port={$port};dbname={$dbDatabaseValue};sslmode={$sslMode}" . ($sslRootCert !== '' ? ";sslrootcert={$sslRootCert}" : '')
                     : "mysql:host={$host};port={$port};dbname={$dbDatabaseValue};charset=utf8mb4";
-                new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+                $pdoOptions = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+                if ($driver === 'mysql' && $mysqlSslCa !== '') {
+                    $pdoOptions[PDO::MYSQL_ATTR_SSL_CA] = $mysqlSslCa;
+                    $pdoOptions[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = true;
+                }
+                new PDO($dsn, $user, $pass, $pdoOptions);
             } catch (\Throwable $e) {
                 return back()->withInput()->withErrors(['db' => 'Database connection failed: ' . $e->getMessage()]);
             }
@@ -121,7 +161,13 @@ class InstallController extends Controller
             $envLines[] = 'DB_DATABASE="' . addslashes($dbDatabaseValue) . '"';
             $envLines[] = 'DB_USERNAME="' . addslashes((string) ($data['db_username'] ?? 'root')) . '"';
             $envLines[] = 'DB_PASSWORD="' . addslashes((string) ($data['db_password'] ?? '')) . '"';
-            $envLines[] = 'DB_SSLMODE=' . $sslMode;
+            if ($driver === 'pgsql') {
+                $envLines[] = 'DB_SSLMODE=' . $sslMode;
+                if ($sslRootCert !== '') $envLines[] = 'DB_SSLROOTCERT="' . addslashes($sslRootCert) . '"';
+            } else {
+                $envLines[] = 'MYSQL_ATTR_SSL_CA=' . ($mysqlSslCa !== '' ? '"' . addslashes($mysqlSslCa) . '"' : '');
+                $envLines[] = 'MYSQL_ATTR_SSL_VERIFY_SERVER_CERT=true';
+            }
         }
 
         $envLines[] = 'SESSION_DRIVER=database';
@@ -153,6 +199,8 @@ class InstallController extends Controller
                 "database.connections.{$driver}.username" => (string) ($data['db_username'] ?? 'root'),
                 "database.connections.{$driver}.password" => (string) ($data['db_password'] ?? ''),
                 "database.connections.pgsql.sslmode" => $sslMode,
+                "database.connections.pgsql.sslrootcert" => $sslRootCert ?: null,
+                "database.connections.mysql.options" => ($driver === 'mysql' && $mysqlSslCa !== '') ? [PDO::MYSQL_ATTR_SSL_CA => $mysqlSslCa, PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => true] : [],
             ]);
         }
         DB::purge($driver);

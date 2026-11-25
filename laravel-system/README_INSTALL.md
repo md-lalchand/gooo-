@@ -43,6 +43,11 @@ Once installed on your live domain, future application updates can be applied di
    ```
    Alongside any changed `app/`, `resources/`, `routes/`, `config/`, or new incremental `database/migrations/` files.
 
+## Database TLS Verification
+- Remote MySQL/MariaDB connections require a readable CA certificate path; the installer passes it to PDO and enables server-certificate verification.
+- PostgreSQL supports `require`, `verify-ca`, and `verify-full`; the latter two require a readable `DB_SSLROOTCERT` path. Prefer `verify-full` when your provider supplies its CA bundle.
+- TLS may be disabled only for local development databases. Keep certificate files outside the public web root and never commit them.
+
 ## SMTP Email Delivery & Password Recovery
 The self-service recovery flow emails a cryptographically random, single-use token to the account's registered email address. Configure a production SMTP transport before enabling live account recovery. Example environment values:
 
