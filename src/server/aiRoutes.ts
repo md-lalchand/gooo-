@@ -3,6 +3,7 @@ import type { AiAgentRole, UserRole } from '../types';
 import { consumePublicRateLimit } from './publicRedaction';
 import { getClientIp } from './security';
 import { getDb, recordAuditLog, saveDb } from './store';
+import { normalizeGeneratedQuestions } from './aiValidation';
 
 const AGENT_INSTRUCTIONS: Record<AiAgentRole, string> = {
   student:
@@ -83,15 +84,19 @@ export function createAiRouter(getAuthUser: (req: Request) => { id: string; name
       res.status(401).json({ error: 'Please sign in to access personalized AI Study Advisor.' });
       return;
     }
-    if (!authUser) {
-      const rateCheck = consumePublicRateLimit(`ai-guest:${getClientIp(req)}`, 20, 5 * 60 * 1000);
-      if (!rateCheck.allowed) {
-        res.setHeader('Retry-After', String(rateCheck.retryAfterSeconds));
-        res.status(429).json({
-          error: `Guest AI chat rate limit reached. Try again in ${rateCheck.retryAfterSeconds}s or sign in.`,
-        });
-        return;
-      }
+    const rateKey = authUser
+      ? `ai-user-chat:${authUser.id}`
+      : `ai-guest:${getClientIp(req)}`;
+    const rateLimit = authUser ? 60 : 20;
+    const rateCheck = consumePublicRateLimit(rateKey, rateLimit, 5 * 60 * 1000);
+    if (!rateCheck.allowed) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSeconds));
+      res.status(429).json({
+        error: authUser
+          ? `AI chat rate limit reached. Try again in ${rateCheck.retryAfterSeconds}s.`
+          : `Guest AI chat rate limit reached. Try again in ${rateCheck.retryAfterSeconds}s or sign in.`,
+      });
+      return;
     }
 
     const db = getDb();
@@ -126,6 +131,13 @@ export function createAiRouter(getAuthUser: (req: Request) => { id: string; name
       return;
     }
 
+    const rateCheck = consumePublicRateLimit(`ai-user-questions:${authUser.id}`, 20, 5 * 60 * 1000);
+    if (!rateCheck.allowed) {
+      res.setHeader('Retry-After', String(rateCheck.retryAfterSeconds));
+      res.status(429).json({ error: `AI question generation rate limit reached. Try again in ${rateCheck.retryAfterSeconds}s.` });
+      return;
+    }
+
     const subject = String(req.body?.subject ?? 'HSC English 2nd Paper').trim().slice(0, 160);
     const chapter = String(req.body?.chapter ?? 'Right Form of Verbs').trim().slice(0, 160);
     const count = Math.min(10, Math.max(1, Number(req.body?.count) || 3));
@@ -140,12 +152,19 @@ export function createAiRouter(getAuthUser: (req: Request) => { id: string; name
         res.status(503).json({ error: 'AI provider is not configured. Set AI_API_URL, AI_API_KEY, and AI_MODEL in the server environment.' });
         return;
       }
-      const parsed = JSON.parse(generated) as { items?: unknown };
-      if (!Array.isArray(parsed.items)) {
-        res.status(502).json({ error: 'AI provider returned an invalid question payload.' });
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(generated);
+      } catch {
+        res.status(502).json({ error: 'AI provider returned malformed JSON.' });
         return;
       }
-      res.json({ items: parsed.items.slice(0, count) });
+      const items = normalizeGeneratedQuestions(parsed, count);
+      if (!items) {
+        res.status(502).json({ error: 'AI provider returned a question payload that failed schema validation.' });
+        return;
+      }
+      res.json({ items });
     } catch {
       res.status(502).json({ error: 'AI question generation failed. Check the configured AI provider response.' });
     }
