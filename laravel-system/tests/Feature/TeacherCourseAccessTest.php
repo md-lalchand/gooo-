@@ -143,6 +143,58 @@ class TeacherCourseAccessTest extends TestCase
         $this->assertSame('submitted', $submissionB->fresh()->status);
     }
 
+
+    public function test_teacher_cannot_create_foreign_lessons_assignments_announcements_or_scorm_packages(): void
+    {
+        $branchA = $this->makeBranch('Teaching A', 'TCA');
+        $branchB = $this->makeBranch('Teaching B', 'TCB');
+        $teacherA = $this->makeUser('teacher', $branchA->id, 'teacher.a@example.test');
+        $teacherB = $this->makeUser('teacher', $branchB->id, 'teacher.b@example.test');
+        $courseA = $this->makeCourse('Teaching A Course');
+        $courseB = $this->makeCourse('Teaching B Course');
+        $this->makeBatch($courseA, $branchA, $teacherA, 'TEACH-A');
+        $batchB = $this->makeBatch($courseB, $branchB, $teacherB, 'TEACH-B');
+
+        $this->actingAs($teacherA)
+            ->post(route('portal.lessons.store'), [
+                'course_id' => $courseB->id,
+                'batch_id' => $batchB->id,
+                'lesson_type' => 'recorded',
+                'title' => 'Foreign Lesson',
+                'module_name' => 'Foreign Module',
+                'duration' => '20 min',
+            ])->assertForbidden();
+
+        $this->actingAs($teacherA)
+            ->post(route('portal.assignments.store'), [
+                'course_id' => $courseB->id,
+                'title' => 'Foreign Assignment',
+                'instructions' => 'Not allowed',
+                'max_marks' => 100,
+            ])->assertForbidden();
+
+        $this->actingAs($teacherA)
+            ->post(route('portal.course_announcements.store'), [
+                'course_id' => $courseB->id,
+                'title' => 'Foreign Announcement',
+                'body' => 'Not allowed',
+            ])->assertForbidden();
+
+        $this->actingAs($teacherA)
+            ->post(route('portal.scorm.store'), [
+                'course_id' => $courseB->id,
+                'title' => 'Foreign SCORM',
+                'identifier' => 'FOREIGN-01',
+                'xp_reward' => 100,
+                'html_content' => '<p>Not allowed</p>',
+            ])->assertForbidden();
+
+        $this->assertSame(0, \App\Models\Lesson::where('title', 'Foreign Lesson')->count());
+        $this->assertSame(0, CourseAssignment::where('title', 'Foreign Assignment')->count());
+        $this->assertSame(0, \App\Models\CourseAnnouncement::where('title', 'Foreign Announcement')->count());
+        $this->assertSame(0, ScormPackage::where('identifier', 'FOREIGN-01')->count());
+    }
+
     public function test_teacher_exam_and_scorm_actions_require_an_assigned_course(): void
     {
         $branchA = $this->makeBranch('Central', 'CTR');
