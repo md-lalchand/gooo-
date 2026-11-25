@@ -55,7 +55,7 @@ class InstallController extends Controller
             'db_connection' => 'required|in:sqlite,mysql,pgsql',
             'db_host' => 'nullable|string|max:120|regex:/^[A-Za-z0-9.:-]+$/',
             'db_port' => 'nullable|numeric',
-            'db_database' => 'required|string|max:180|regex:/^[A-Za-z0-9_.-]+$/',
+            'db_database' => 'required|string|max:180',
             'db_username' => 'nullable|string|max:120',
             'db_password' => 'nullable|string|max:200',
             'db_sslmode' => 'nullable|in:disable,prefer,require,verify-ca,verify-full',
@@ -68,6 +68,9 @@ class InstallController extends Controller
 
         $driver = $data['db_connection'];
         $dbDatabaseValue = trim($data['db_database']);
+        if ($driver !== 'sqlite' && !preg_match('/^[A-Za-z0-9_.-]+$/', $dbDatabaseValue)) {
+            return back()->withInput()->withErrors(['db_database' => 'Database names may contain only letters, numbers, dots, underscores, and hyphens.']);
+        }
         $sslMode = (string) ($data['db_sslmode'] ?? 'require');
         $sslRootCert = trim((string) ($data['db_sslrootcert'] ?? ''));
         $mysqlSslCa = trim((string) ($data['db_ssl_ca'] ?? ''));
