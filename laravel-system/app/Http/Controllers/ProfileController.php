@@ -7,6 +7,7 @@ use App\Models\InAppNotification;
 use App\Support\AuditRecorder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 
 class ProfileController extends Controller
 {
@@ -71,7 +72,7 @@ class ProfileController extends Controller
         $user = $request->user();
         $data = $request->validate([
             'current_password' => 'required|string',
-            'password' => 'required|string|min:6|confirmed',
+            'password' => ['required', 'string', 'confirmed', Password::min(12)->mixedCase()->numbers()->symbols()],
         ]);
 
         if (!Hash::check($data['current_password'], $user->password)) {
