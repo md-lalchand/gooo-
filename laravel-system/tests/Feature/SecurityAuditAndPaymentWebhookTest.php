@@ -42,6 +42,37 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         parent::tearDown();
     }
 
+
+    public function test_self_service_password_recovery_emails_a_long_one_time_token(): void
+    {
+        Notification::fake();
+
+        $user = User::create([
+            'name' => 'Recovery Student',
+            'email' => 'recovery@student.example',
+            'role' => 'student',
+            'status' => 'active',
+            'password' => Hash::make('ExistingPass123!'),
+        ]);
+
+        $this->post(route('recover.request'), [
+            'email' => $user->email,
+            'expected_role' => 'student',
+        ])->assertRedirect(route('recover', ['role' => 'student']));
+
+        $user->refresh();
+        $this->assertNotEmpty($user->password_reset_token_hash);
+        $this->assertNotNull($user->password_reset_expires_at);
+        Notification::assertSentTo($user, PasswordRecoveryToken::class, function (PasswordRecoveryToken $notification): bool {
+            $token = (new \\ReflectionClass($notification))->getProperty('token');
+            $token->setAccessible(true);
+            $rawToken = $token->getValue($notification);
+
+            return strlen($rawToken) === 64
+                && hash_equals(hash('sha256', $rawToken), $user->password_reset_token_hash);
+        });
+    }
+
     public function test_guardian_registration_requires_student_phone_or_hmac_linking_code(): void
     {
         $branch = Branch::create([
