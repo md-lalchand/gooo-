@@ -497,6 +497,53 @@ PHP
         ]);
     }
 
+    public function test_portable_backup_contains_encrypted_environment_and_restores_database_consistently(): void
+    {
+        $admin = User::create([
+            'name' => 'Backup Admin',
+            'email' => 'backup-admin@example.test',
+            'role' => 'admin',
+            'password' => Hash::make('StrongBackupPass123!'),
+        ]);
+        $student = User::create([
+            'name' => 'Snapshot Student',
+            'email' => 'snapshot-student@example.test',
+            'role' => 'student',
+            'password' => Hash::make('StrongStudentPass123!'),
+        ]);
+
+        $service = app(SystemUpdateService::class);
+        $result = $service->createFullBackup($admin->name, 'Portable backup regression');
+        $archivePath = storage_path('app/backups/backup-' . $result['snapshot']->id . '.zip');
+        $this->assertFileExists($archivePath);
+        $this->cleanupFiles[] = $archivePath;
+
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($archivePath) === true);
+        $this->assertIsString($zip->getFromName('database.json'));
+        $encryptedEnvironment = $zip->getFromName('environment/.env.encrypted');
+        $this->assertIsString($encryptedEnvironment);
+        $this->assertStringNotContainsString('APP_NAME=', $encryptedEnvironment);
+        $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
+        $this->assertSame('lms-portable-backup-v1', $manifest['format'] ?? null);
+        $this->assertArrayHasKey('uploads/storage-app-public/.backup-root', $manifest['entries'] ?? []);
+        $zip->close();
+
+        User::create([
+            'name' => 'Post Snapshot User',
+            'email' => 'after-snapshot@example.test',
+            'role' => 'student',
+            'password' => Hash::make('StrongStudentPass456!'),
+        ]);
+        $restored = $service->restorePortableBackup($result['snapshot'], $admin->name);
+
+        $this->assertArrayHasKey('table_counts', $restored);
+        $this->assertFileExists($restored['environment_restore_path']);
+        $this->cleanupFiles[] = $restored['environment_restore_path'];
+        $this->assertDatabaseHas('users', ['email' => 'snapshot-student@example.test']);
+        $this->assertDatabaseMissing('users', ['email' => 'after-snapshot@example.test']);
+    }
+
     private function removeDirectoryRecursive(string $dir): void
     {
         if (!is_dir($dir)) {
