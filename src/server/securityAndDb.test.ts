@@ -154,6 +154,26 @@ describe('EDUPro Security, RBAC, DB Constraints & Payments', () => {
     );
   });
 
+  test('password reset tokens are single-use and expired tokens cannot be consumed', () => {
+    const state = getDb();
+    const student = state.users.find((u) => u.role === 'student');
+    assert.ok(student);
+
+    const token = createPasswordResetToken(student.id);
+    assert.equal(consumePasswordResetToken(token), student.id);
+    assert.equal(consumePasswordResetToken(token), null);
+
+    const expiredToken = createPasswordResetToken(student.id);
+    const sqlite = getSqliteDb();
+    const latest = sqlite
+      .prepare('SELECT id FROM password_reset_tokens WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 1')
+      .get(student.id) as { id: string } | undefined;
+    assert.ok(latest);
+    sqlite.prepare('UPDATE password_reset_tokens SET expires_at = ? WHERE id = ?')
+      .run(new Date(Date.now() - 60_000).toISOString(), latest.id);
+    assert.equal(consumePasswordResetToken(expiredToken), null);
+  });
+
   test('password hashing, strength checks, signed session tokens, and session revocation work properly', () => {
     assert.equal(isStrongPassword('short1', 8), false);
     assert.equal(isStrongPassword('onlyletters', 8), false);
