@@ -319,6 +319,44 @@ class TeacherCourseAccessTest extends TestCase
         $this->assertDatabaseMissing('scorm_attempts', ['scorm_package_id' => $packageB->id]);
     }
 
+
+    public function test_branch_and_teacher_views_hide_other_batches_of_the_same_course(): void
+    {
+        $branchA = $this->makeBranch('Same Course North', 'SCN');
+        $branchB = $this->makeBranch('Same Course South', 'SCS');
+        $branchUser = $this->makeUser('branch', $branchA->id, 'same.course.branch@example.test');
+        $teacherA = $this->makeUser('teacher', $branchA->id, 'same.course.teacher.a@example.test');
+        $teacherB = $this->makeUser('teacher', $branchB->id, 'same.course.teacher.b@example.test');
+        $course = $this->makeCourse('Shared Cross-Branch Course');
+        $batchA = $this->makeBatch($course, $branchA, $teacherA, 'SAME-NORTH');
+        $batchB = $this->makeBatch($course, $branchB, $teacherB, 'SAME-SOUTH');
+
+        $lessonA = \App\Models\Lesson::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchA->id,
+            'lesson_type' => 'recorded',
+            'title' => 'North Batch Only Lesson',
+            'module_name' => 'North Module',
+            'duration' => '20 min',
+        ]);
+        $lessonB = \App\Models\Lesson::create([
+            'course_id' => $course->id,
+            'batch_id' => $batchB->id,
+            'lesson_type' => 'recorded',
+            'title' => 'South Batch Only Lesson',
+            'module_name' => 'South Module',
+            'duration' => '20 min',
+        ]);
+
+        $this->actingAs($branchUser)->get(route('portal.index'))
+            ->assertOk()
+            ->assertViewHas('lessons', fn ($lessons) => $lessons->contains('id', $lessonA->id) && !$lessons->contains('id', $lessonB->id));
+
+        $this->actingAs($teacherA)->get(route('portal.index'))
+            ->assertOk()
+            ->assertViewHas('lessons', fn ($lessons) => $lessons->contains('id', $lessonA->id) && !$lessons->contains('id', $lessonB->id));
+    }
+
     public function test_student_must_be_enrolled_in_scorm_course_to_earn_xp(): void
     {
         $branch = $this->makeBranch('Learner Branch', 'LRN');
