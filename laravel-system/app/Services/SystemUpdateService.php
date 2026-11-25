@@ -669,14 +669,51 @@ class SystemUpdateService
     public function runPendingMigrationsSafely(string $actorName): array
     {
         $pendingBefore = $this->pendingMigrations();
+        $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
         $backup = $this->createFullBackup($actorName, 'Pre-Migration Safety Snapshot');
 
-        Artisan::call('migrate', ['--force' => true]);
+        try {
+            $exitCode = Artisan::call('migrate', ['--force' => true]);
+            if ($exitCode !== 0) {
+                throw new RuntimeException('One or more pending database migrations failed.');
+            }
 
-        return [
-            'backup_id' => $backup['snapshot']->id,
-            'migrations_applied' => $pendingBefore,
-        ];
+            $ranAfter = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $applied = array_values(array_diff($ranAfter, $ranBefore));
+            $stillPending = array_values(array_intersect($pendingBefore, $this->pendingMigrations()));
+            if ($stillPending !== []) {
+                throw new RuntimeException('Some migrations remain pending: ' . implode(', ', $stillPending));
+            }
+
+            return [
+                'backup_id' => $backup['snapshot']->id,
+                'migrations_applied' => $applied,
+            ];
+        } catch (\Throwable $exception) {
+            $ranAfterFailure = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $newMigrations = array_values(array_diff($ranAfterFailure, $ranBefore));
+            $rollbackWarning = null;
+
+            if ($newMigrations !== []) {
+                try {
+                    $rollbackExitCode = Artisan::call('migrate:rollback', ['--step' => 1, '--force' => true]);
+                    $remaining = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+                    if ($rollbackExitCode !== 0 || array_diff($remaining, $ranBefore) !== []) {
+                        throw new RuntimeException('Newly applied migration batch remains after rollback.');
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarning = 'Automatic migration rollback failed: ' . $rollbackException->getMessage();
+                }
+            } else {
+                $rollbackWarning = 'The failing migration was not recorded as applied; inspect the schema for partial changes.';
+            }
+
+            $message = "Migration failed. Pre-migration backup #{$backup['snapshot']->id} was preserved. " . $exception->getMessage();
+            if ($rollbackWarning !== null) {
+                $message .= ' ' . $rollbackWarning;
+            }
+            throw new RuntimeException($message, 0, $exception);
+        }
     }
 
     public function isProtectedPath(string $relativePath): bool
