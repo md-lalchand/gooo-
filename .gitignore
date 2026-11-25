@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime databases, WAL files, and recovery snapshots must never be committed
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

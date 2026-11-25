@@ -29,6 +29,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
             $this->originalLock = file_get_contents($this->lockPath) ?: '';
         }
         file_put_contents($this->lockPath, json_encode(['installed' => true]));
+        config(['services.payment_webhook_secret' => 'test-dedicated-webhook-secret']);
     }
 
     protected function tearDown(): void
@@ -185,6 +186,28 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         ])->assertRedirect(route('portal.index'));
     }
 
+
+    public function test_payment_webhook_fails_closed_when_dedicated_secret_is_missing(): void
+    {
+        config(['services.payment_webhook_secret' => '']);
+        $payload = json_encode([
+            'enrollment_id' => 1,
+            'trx_id' => 'TRX-NO-SECRET',
+            'amount' => 100,
+            'status' => 'SUCCESS',
+        ]);
+
+        $this->call(
+            'POST',
+            '/payments/webhook/bkash',
+            [],
+            [],
+            [],
+            ['HTTP_X_WEBHOOK_SIGNATURE' => 'anything', 'CONTENT_TYPE' => 'application/json'],
+            (string) $payload
+        )->assertStatus(503)->assertJson(['error' => 'Payment webhook secret is not configured.']);
+    }
+
     public function test_paid_enrollment_rejects_invalid_webhook_and_requires_signed_settlement(): void
     {
         $branch = Branch::create([
@@ -268,7 +291,7 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
         $this->assertSame('pending', $enrollment->fresh()->status);
 
         // Valid signature but mismatched amount returns 400
-        $secret = (string) (env('PAYMENT_WEBHOOK_SECRET') ?: config('app.key'));
+        $secret = (string) config('services.payment_webhook_secret');
         $mismatchPayload = json_encode([
             'enrollment_id' => $enrollment->id,
             'trx_id' => 'TRX-UNDERPAY-1',
