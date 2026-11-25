@@ -345,6 +345,158 @@ PHP
         ]);
     }
 
+
+    public function test_database_backup_files_are_private_and_do_not_copy_environment_secrets(): void
+    {
+        file_put_contents($this->envPath, "APP_NAME=\"Private Academy\"\nSECRET_TOKEN=must_not_be_backed_up\n");
+
+        $result = app(SystemUpdateService::class)->createFullBackup('Site Admin', 'Private Backup');
+        $backupPath = storage_path('app/backups/' . $result['file_name']);
+        $this->cleanupFiles[] = $backupPath;
+
+        $this->assertFileExists($backupPath);
+        $this->assertSame(0700, fileperms(dirname($backupPath)) & 0777);
+        $this->assertSame(0600, fileperms($backupPath) & 0777);
+        $this->assertStringNotContainsString('must_not_be_backed_up', (string) $result['snapshot']->payload_json);
+        $this->assertSame($result['checksum'], hash_file('sha256', $backupPath));
+    }
+
+    public function test_restore_rejects_tampered_or_malformed_snapshots_without_mutating_live_records(): void
+    {
+        $branch = Branch::create(['name' => 'Original Branch', 'code' => 'ORG', 'city' => 'Dhaka', 'address' => 'Original Address', 'status' => 'active']);
+        $service = app(SystemUpdateService::class);
+        $valid = $service->createFullBackup('Site Admin', 'Before Tamper')['snapshot'];
+
+        $branch->update(['name' => 'Live Data Must Remain']);
+        $valid->update(['payload_json' => '{"format":"lms-full-backup-v1","tables":[],"table_counts":[]}']);
+
+        try {
+            $service->restoreBackupSnapshot($valid, 'Site Admin');
+            $this->fail('Tampered backup should not be restored.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('SHA-256', $exception->getMessage());
+        }
+        $this->assertSame('Live Data Must Remain', $branch->fresh()->name);
+
+        $malformedPayload = json_encode([
+            'format' => 'unknown-backup-format',
+            'table_counts' => [],
+            'tables' => [],
+        ], JSON_THROW_ON_ERROR);
+        $malformed = BackupSnapshot::create([
+            'label' => 'Malformed Test Snapshot',
+            'reason' => 'manual',
+            'checksum_sha256' => hash('sha256', $malformedPayload),
+            'verified' => true,
+            'created_by' => 'Site Admin',
+            'payload_json' => $malformedPayload,
+        ]);
+
+        try {
+            $service->restoreBackupSnapshot($malformed, 'Site Admin');
+            $this->fail('Malformed backup should not be restored.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Unsupported or malformed', $exception->getMessage());
+        }
+        $this->assertSame('Live Data Must Remain', $branch->fresh()->name);
+    }
+
+    public function test_update_zip_rejects_symbolic_link_entries(): void
+    {
+        $zipPath = storage_path('app/test-symlink-update-' . bin2hex(random_bytes(3)) . '.zip');
+        $this->cleanupFiles[] = $zipPath;
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE));
+        $zip->addFromString('resources/views/linked.php', '<?php echo "target";');
+        $zip->setExternalAttributesName('resources/views/linked.php', ZipArchive::OPSYS_UNIX, (0120777 << 16));
+        $zip->close();
+
+        try {
+            app(SystemUpdateService::class)->inspectUpdateZip($zipPath);
+            $this->fail('Symbolic-link archive entry should be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Symbolic links', $exception->getMessage());
+        }
+    }
+
+    public function test_update_refuses_to_write_through_existing_destination_symlinks(): void
+    {
+        $sandboxBase = storage_path('app/test-symlink-target-' . bin2hex(random_bytes(3)));
+        $outsideDir = storage_path('app/test-symlink-outside-' . bin2hex(random_bytes(3)));
+        $this->cleanupDirs[] = $sandboxBase;
+        $this->cleanupDirs[] = $outsideDir;
+        mkdir($sandboxBase . '/resources', 0755, true);
+        mkdir($outsideDir, 0755, true);
+        $symlinkPath = $sandboxBase . '/resources/views';
+        $this->cleanupFiles[] = $symlinkPath;
+        symlink($outsideDir, $symlinkPath);
+
+        $zipPath = storage_path('app/test-symlink-dest-' . bin2hex(random_bytes(3)) . '.zip');
+        $this->cleanupFiles[] = $zipPath;
+        $zip = new ZipArchive();
+        $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+        $zip->addFromString('resources/views/escaped.php', '<?php echo "escaped";');
+        $zip->close();
+
+        try {
+            app(SystemUpdateService::class)->applyUpdateZip($zipPath, 'symlink-dest.zip', 'Site Admin', $sandboxBase);
+            $this->fail('Update should not write through a destination symlink.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('symbolic-link directory', $exception->getMessage());
+        }
+
+        $this->assertFileDoesNotExist($outsideDir . '/escaped.php');
+        @unlink($symlinkPath);
+    }
+
+    public function test_failed_update_migration_is_not_reported_as_applied_and_files_are_rolled_back(): void
+    {
+        $sandboxBase = storage_path('app/test-migration-failure-' . bin2hex(random_bytes(3)));
+        $this->cleanupDirs[] = $sandboxBase;
+        mkdir($sandboxBase . '/resources/views', 0755, true);
+        mkdir($sandboxBase . '/database/migrations', 0755, true);
+        file_put_contents($sandboxBase . '/resources/views/panel.txt', 'stable-before-update');
+
+        $zipPath = storage_path('app/test-failed-migration-' . bin2hex(random_bytes(3)) . '.zip');
+        $this->cleanupFiles[] = $zipPath;
+        $zip = new ZipArchive();
+        $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+        $zip->addFromString('version.json', json_encode(['version' => '1.3.0']));
+        $zip->addFromString('resources/views/panel.txt', 'new-but-not-safe');
+        $zip->addFromString('database/migrations/2026_11_25_000198_test_failing_migration.php', <<<'PHP'
+<?php
+use Illuminate\Database\Migrations\Migration;
+
+return new class extends Migration {
+    public function up(): void
+    {
+        throw new RuntimeException('Simulated migration failure');
+    }
+
+    public function down(): void
+    {
+    }
+};
+PHP
+        );
+        $zip->close();
+
+        try {
+            app(SystemUpdateService::class)->applyUpdateZip($zipPath, 'failed-migration.zip', 'Site Admin', $sandboxBase);
+            $this->fail('Failed migration must abort the update.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('migrations failed', strtolower($exception->getMessage()));
+        }
+
+        $this->assertSame('stable-before-update', file_get_contents($sandboxBase . '/resources/views/panel.txt'));
+        $this->assertFileDoesNotExist($sandboxBase . '/database/migrations/2026_11_25_000198_test_failing_migration.php');
+        $this->assertFileDoesNotExist(storage_path('framework/updating.flag'));
+        $this->assertDatabaseHas('system_updates', [
+            'package_name' => 'failed-migration.zip',
+            'status' => 'rollback_failed',
+        ]);
+    }
+
     private function removeDirectoryRecursive(string $dir): void
     {
         if (!is_dir($dir)) {
