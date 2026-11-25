@@ -190,8 +190,9 @@ export function clearAuthSessionCookie(req: Request, res: Response): void {
 }
 
 export function getClientIp(req: Request): string {
-  const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0]?.trim();
-  return fwd || req.ip || req.socket.remoteAddress || 'unknown';
+  // Express resolves req.ip using the configured trusted-proxy chain.
+  // Never trust X-Forwarded-For directly: clients can spoof that header.
+  return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
 // ---------------- RFC 6238 TOTP TWO-FACTOR AUTHENTICATION ----------------
