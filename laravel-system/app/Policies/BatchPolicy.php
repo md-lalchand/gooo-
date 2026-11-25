@@ -47,7 +47,7 @@ class BatchPolicy
             return true;
         }
         if ($user->role === 'branch') {
-            return !$user->branch_id || (int) $batch->branch_id === (int) $user->branch_id;
+            return $user->branch_id !== null && (int) $batch->branch_id === (int) $user->branch_id;
         }
         return false;
     }
