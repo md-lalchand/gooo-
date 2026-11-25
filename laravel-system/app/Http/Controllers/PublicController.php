@@ -247,6 +247,29 @@ class PublicController extends Controller
             return response()->json(['error' => 'Payment webhook secret is not configured.'], 503);
         }
 
+        // A webhook URL must identify one configured, active online/MFS gateway.
+        // Manual bank/cash methods must never be settled by an external callback.
+        $gatewaysRaw = DB::table('settings')->where('key', 'payment_gateways')->value('value');
+        $configuredGateways = $gatewaysRaw
+            ? (json_decode($gatewaysRaw, true) ?? [])
+            : PortalController::defaultPaymentGateways();
+        $routeGateway = strtolower(trim($gateway));
+        $matchedGateway = collect($configuredGateways)->first(function ($configured) use ($routeGateway) {
+            if (empty($configured['active']) || !in_array($configured['provider_type'] ?? '', ['mfs', 'online'], true)) {
+                return false;
+            }
+
+            $configuredId = strtolower(trim((string) ($configured['id'] ?? '')));
+            $configuredName = \\Illuminate\\Support\\Str::slug((string) ($configured['name'] ?? ''));
+
+            return ($configuredId !== '' && hash_equals($configuredId, $routeGateway))
+                || ($configuredName !== '' && hash_equals($configuredName, \\Illuminate\\Support\\Str::slug($routeGateway)));
+        });
+
+        if (!$matchedGateway) {
+            return response()->json(['error' => 'Payment gateway is not active or does not accept webhooks.'], 404);
+        }
+
         $signedPayload = $rawBody !== '' ? $rawBody : (string) json_encode($request->only(['enrollment_id', 'trx_id', 'amount', 'status']));
         $expectedSig = hash_hmac('sha256', $signedPayload, $secret);
 
@@ -262,6 +285,10 @@ class PublicController extends Controller
         ]);
 
         $enrollment = Enrollment::findOrFail($data['enrollment_id']);
+        if (strcasecmp(trim((string) $enrollment->payment_method), trim((string) ($matchedGateway['name'] ?? ''))) !== 0) {
+            return response()->json(['error' => 'Webhook gateway does not match the enrollment payment method.'], 409);
+        }
+
         if ((int) $data['amount'] !== (int) $enrollment->amount_paid) {
             return response()->json(['error' => 'Webhook amount mismatch.'], 400);
         }
