@@ -350,6 +350,10 @@
             <h2 class="text-lg font-extrabold text-slate-900">Exams &amp; Question Bank ({{ $questionBank->count() }} MCQs · {{ $exams->count() }} Exams)</h2>
             <form method="POST" action="{{ route('portal.exams.store') }}" class="grid grid-cols-1 md:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
                 @csrf
+                <select name="course_id" {{ $user->role === 'teacher' ? 'required' : '' }} class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs md:col-span-3">
+                    @if($user->role === 'admin')<option value="">General Exam (not course-linked)</option>@endif
+                    @foreach($courses as $course)<option value="{{ $course->id }}">{{ $course->title }}</option>@endforeach
+                </select>
                 <input type="text" name="title" required placeholder="Exam Title" class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs md:col-span-2">
                 <input type="text" name="category" required value="General" placeholder="Category" class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs">
                 <input type="text" name="prompt" required placeholder="Sample MCQ Question Prompt" class="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs md:col-span-3">
