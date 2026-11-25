@@ -46,3 +46,79 @@ jobs:
           touch database/database.sqlite
       - name: Run Laravel Feature & Unit Test Suite
         run: php artisan test --stop-on-failure
+
+  runtime-smoke:
+    name: Node API & Laravel Runtime Smoke Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-package-lock
+      - run: npm run build
+      - name: Start Node API in production mode
+        env:
+          NODE_ENV: production
+          SESSION_SECRET: ci-only-session-secret-that-is-at-least-thirty-two-characters-long
+          REDIS_URL: redis://127.0.0.1:6379
+          PORT: '3100'
+        run: |
+          npm start > /tmp/node-api-3100.log 2>&1 &
+          echo $! > /tmp/node-api-3100.pid
+          PORT=3101 npm start > /tmp/node-api-3101.log 2>&1 &
+          echo $! > /tmp/node-api-3101.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3100/api/public/bootstrap > /tmp/node-bootstrap.json; then
+              break
+            fi
+            sleep 2
+          done
+          test -s /tmp/node-bootstrap.json
+          # Both processes must consume the same Redis guest-IP counter.
+          last_status=0
+          for attempt in $(seq 1 121); do
+            port=3100
+            if [ $((attempt % 2)) -eq 0 ]; then port=3101; fi
+            last_status=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/api/public/bootstrap")
+          done
+          test "$last_status" = "429"
+          kill "$(cat /tmp/node-api-3100.pid)" "$(cat /tmp/node-api-3101.pid)" || true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, pdo_sqlite, pdo_mysql, pdo_pgsql, zip, gd, xml, ctype, bcmath
+      - name: Prepare Laravel runtime
+        working-directory: laravel-system
+        run: |
+          composer install --no-interaction --prefer-dist
+          cp .env.example .env
+          php artisan key:generate --force
+          mkdir -p database
+          touch database/database.sqlite
+          php artisan migrate --force
+      - name: Start Laravel runtime and verify health
+        working-directory: laravel-system
+        run: |
+          php artisan serve --host=127.0.0.1 --port=8100 > /tmp/laravel-runtime.log 2>&1 &
+          echo $! > /tmp/laravel-runtime.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8100/up > /tmp/laravel-health.txt; then
+              break
+            fi
+            sleep 2
+          done
+          test -s /tmp/laravel-health.txt
+          kill "$(cat /tmp/laravel-runtime.pid)" || true

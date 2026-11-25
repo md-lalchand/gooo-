@@ -1,0 +1,78 @@
+name: Guarded Production Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_verified:
+        description: Confirm a verified portable backup exists off-host and its BACKUP_ENCRYPTION_KEY is escrowed
+        required: true
+        type: boolean
+        default: false
+      node_service:
+        description: systemd service name for the Node API
+        required: true
+        type: string
+      php_fpm_service:
+        description: systemd service name for PHP-FPM
+        required: true
+        type: string
+      node_health_url:
+        description: Public Node health/bootstrap URL
+        required: true
+        type: string
+      laravel_health_url:
+        description: Public Laravel /up URL
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy main to production (manual approval required)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Require backup confirmation
+        if: ${{ inputs.backup_verified != true }}
+        run: |
+          echo "A verified off-host backup and escrowed BACKUP_ENCRYPTION_KEY are required." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+        run: |
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Execute guarded remote deployment
+        env:
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+          NODE_SERVICE: ${{ inputs.node_service }}
+          PHP_FPM_SERVICE: ${{ inputs.php_fpm_service }}
+          NODE_HEALTH_URL: ${{ inputs.node_health_url }}
+          LARAVEL_HEALTH_URL: ${{ inputs.laravel_health_url }}
+        run: |
+          test -n "$PROD_SSH_HOST"
+          test -n "$PROD_SSH_USER"
+          test -n "$DEPLOY_PATH"
+          printf -v remote_env 'DEPLOY_PATH=%q NODE_SERVICE=%q PHP_FPM_SERVICE=%q NODE_HEALTH_URL=%q LARAVEL_HEALTH_URL=%q bash -s' "$DEPLOY_PATH" "$NODE_SERVICE" "$PHP_FPM_SERVICE" "$NODE_HEALTH_URL" "$LARAVEL_HEALTH_URL"
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "$remote_env" < scripts/deploy-production.sh
