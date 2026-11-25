@@ -42,7 +42,7 @@ jobs:
       - name: Prepare isolated testing environment
         run: |
           cp .env.example .env
-          php artisan key:generate
+          php artisan key:generate --force
           touch database/database.sqlite
       - name: Run Laravel Feature & Unit Test Suite
         run: php artisan test --stop-on-failure
