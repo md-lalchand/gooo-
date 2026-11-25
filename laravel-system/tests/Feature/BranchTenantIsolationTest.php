@@ -256,16 +256,18 @@ class BranchTenantIsolationTest extends TestCase
         Lesson::create([
             'course_id' => $courseA->id,
             'batch_id' => $batchA->id,
-            'lesson_type' => 'video',
+            'lesson_type' => 'recorded',
             'title' => 'North Private Lesson',
+            'module_name' => 'North Module',
             'duration' => '30 min',
             'order_index' => 1,
         ]);
         Lesson::create([
             'course_id' => $courseB->id,
             'batch_id' => $batchB->id,
-            'lesson_type' => 'video',
+            'lesson_type' => 'recorded',
             'title' => 'South Private Lesson',
+            'module_name' => 'South Module',
             'duration' => '30 min',
             'order_index' => 1,
         ]);
