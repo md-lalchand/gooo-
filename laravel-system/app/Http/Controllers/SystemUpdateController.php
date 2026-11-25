@@ -22,6 +22,7 @@ class SystemUpdateController extends Controller
 
     public function downloadBackup(BackupSnapshot $snapshot)
     {
+        $this->updater->verifyBackupSnapshot($snapshot);
         $filename = 'lms-backup-' . $snapshot->id . '-' . now()->format('Ymd-His') . '.json';
         return response($snapshot->payload_json, 200, [
             'Content-Type' => 'application/json',
@@ -76,7 +77,7 @@ class SystemUpdateController extends Controller
                 "System updated cleanly from v{$record->from_version} to v{$record->to_version} ({$record->files_updated_count} file(s) updated, {$migratedCount} incremental migration(s) applied). Pre-update Backup #{$record->backup_snapshot_id} preserved all database records & uploads."
             );
         } catch (\Throwable $e) {
-            return back()->withErrors(['update' => 'Update safely rolled back: ' . $e->getMessage()]);
+            return back()->withErrors(['update' => 'Update failed. Code rollback was attempted; inspect the update history and pre-update backup before retrying: ' . $e->getMessage()]);
         }
     }
 }
