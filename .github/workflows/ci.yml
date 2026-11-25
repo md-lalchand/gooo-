@@ -46,3 +46,58 @@ jobs:
           touch database/database.sqlite
       - name: Run Laravel Feature & Unit Test Suite
         run: php artisan test --stop-on-failure
+
+  runtime-smoke:
+    name: Node API & Laravel Runtime Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-package-lock
+      - run: npm run build
+      - name: Start Node API in production mode
+        env:
+          NODE_ENV: production
+          SESSION_SECRET: ci-only-session-secret-that-is-at-least-thirty-two-characters-long
+          PORT: '3100'
+        run: |
+          npm start > /tmp/node-api.log 2>&1 &
+          echo $! > /tmp/node-api.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3100/api/public/bootstrap > /tmp/node-bootstrap.json; then
+              break
+            fi
+            sleep 2
+          done
+          test -s /tmp/node-bootstrap.json
+          kill "$(cat /tmp/node-api.pid)" || true
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, openssl, pdo_sqlite, pdo_mysql, pdo_pgsql, zip, gd, xml, ctype, bcmath
+      - name: Prepare Laravel runtime
+        working-directory: laravel-system
+        run: |
+          composer install --no-interaction --prefer-dist
+          cp .env.example .env
+          php artisan key:generate --force
+          mkdir -p database
+          touch database/database.sqlite
+          php artisan migrate --force
+      - name: Start Laravel runtime and verify health
+        working-directory: laravel-system
+        run: |
+          php artisan serve --host=127.0.0.1 --port=8100 > /tmp/laravel-runtime.log 2>&1 &
+          echo $! > /tmp/laravel-runtime.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8100/up > /tmp/laravel-health.txt; then
+              break
+            fi
+            sleep 2
+          done
+          test -s /tmp/laravel-health.txt
+          kill "$(cat /tmp/laravel-runtime.pid)" || true
