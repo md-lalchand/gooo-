@@ -1503,17 +1503,20 @@ export function createPasswordResetToken(userId: string): string {
 export function consumePasswordResetToken(rawToken: string): string | null {
   const db = getSqliteDb();
   const tokenHash = hashOpaqueToken(rawToken);
-  const row = db
-    .prepare('SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ? LIMIT 1')
-    .get(tokenHash) as { id: string; user_id: string; expires_at: string; used_at: string | null } | undefined;
-  if (!row || row.used_at || Date.parse(row.expires_at) < Date.now()) {
-    return null;
-  }
-  db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').run(
-    new Date().toISOString(),
-    row.id
-  );
-  return row.user_id;
+  const now = new Date().toISOString();
+
+  // A single conditional UPDATE is atomic in SQLite. Concurrent requests cannot
+  // both read an unused token and successfully consume it.
+  const consumed = db
+    .prepare(
+      `UPDATE password_reset_tokens
+       SET used_at = ?
+       WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+       RETURNING user_id`
+    )
+    .get(now, tokenHash, now) as { user_id: string } | undefined;
+
+  return consumed?.user_id ?? null;
 }
 
 export function saveEncryptedIntegrationSecrets(key: string, secrets: Record<string, string>): void {
