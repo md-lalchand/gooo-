@@ -4,6 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Exam;
 use App\Models\ExamAttempt;
+use App\Models\Enrollment;
+use App\Models\Batch;
+use App\Support\TeacherCourseAccess;
 use App\Models\LearnerReward;
 use Illuminate\Http\Request;
 
@@ -11,7 +14,31 @@ class ExamController extends Controller
 {
     public function index(Request $request)
     {
-        $exams = Exam::with('questions')->latest()->get();
+        $user = $request->user();
+        $examQuery = Exam::with('questions');
+
+        if ($user->role === 'student') {
+            $courseIds = Enrollment::where('user_id', $user->id)->where('status', 'approved')->pluck('course_id');
+            $examQuery->where(function ($query) use ($courseIds) {
+                $query->whereNull('course_id')->orWhereIn('course_id', $courseIds);
+            });
+        } elseif ($user->role === 'teacher') {
+            $courseIds = Batch::where(function ($query) use ($user) {
+                $query->where('main_teacher_id', $user->id)
+                    ->orWhere('assistant_teacher_id', $user->id)
+                    ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $user->id));
+            })->pluck('course_id');
+            $examQuery->where(function ($query) use ($user, $courseIds) {
+                $query->where('teacher_id', $user->id)->orWhereIn('course_id', $courseIds);
+            });
+        } elseif ($user->role === 'branch' && $user->branch_id) {
+            $courseIds = Batch::where('branch_id', $user->branch_id)->pluck('course_id');
+            $examQuery->whereIn('course_id', $courseIds);
+        } elseif ($user->role !== 'admin') {
+            $examQuery->whereRaw('1 = 0');
+        }
+
+        $exams = $examQuery->latest()->get();
         $attempts = ExamAttempt::where('user_id', $request->user()->id)->with('exam')->latest()->get();
         $hiddenUserIds = LearnerReward::where('show_on_leaderboard', false)->pluck('user_id')->all();
         $leaderboard = ExamAttempt::with(['user', 'exam'])
@@ -31,6 +58,21 @@ class ExamController extends Controller
 
     public function submit(Request $request, Exam $exam)
     {
+        $user = $request->user();
+        if ($user->role === 'student') {
+            if ($exam->course_id && !Enrollment::where('user_id', $user->id)->where('course_id', $exam->course_id)->where('status', 'approved')->exists()) {
+                abort(403, 'Approved enrollment in this exam course is required.');
+            }
+        } elseif ($user->role === 'teacher') {
+            if ($exam->course_id) {
+                TeacherCourseAccess::assertCanManageCourse($user, (int) $exam->course_id);
+            } elseif ((int) $exam->teacher_id !== (int) $user->id) {
+                abort(403, 'Teachers can only submit exams they created.');
+            }
+        } elseif ($user->role !== 'admin') {
+            abort(403);
+        }
+
         $exam->load('questions');
         $answers = $request->input('answers', []);
         $score = 0;

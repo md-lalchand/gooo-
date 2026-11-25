@@ -310,14 +310,35 @@ class PublicController extends Controller
             ->where('status', 'approved')
             ->with([
                 'course.lessons.batch',
-                'course.batches',
                 'course.modules.chapters',
-                'course.assignments',
                 'course.announcements.author',
-                'course.scormPackages',
                 'course.routines',
+                'batch',
             ])
             ->get();
+
+        foreach ($enrollments as $enrollment) {
+            $course = $enrollment->course;
+            $batchId = $enrollment->batch_id;
+            $lessonsQuery = $course->lessons()->with('batch');
+            $assignmentsQuery = $course->assignments();
+            if ($batchId) {
+                $lessonsQuery->where(fn ($query) => $query->whereNull('batch_id')->orWhere('batch_id', $batchId));
+                $assignmentsQuery->where(fn ($query) => $query->whereNull('batch_id')->orWhere('batch_id', $batchId));
+            } else {
+                $lessonsQuery->whereNull('batch_id');
+                $assignmentsQuery->whereNull('batch_id');
+            }
+
+            $accessibleLessons = $lessonsQuery->get();
+            $validLessonIds = $accessibleLessons->pluck('id')->map(fn ($id) => (int) $id)->all();
+            $completedIds = array_map('intval', $enrollment->completed_lesson_ids ?? []);
+            $enrollment->setAttribute('accessible_lessons', $accessibleLessons);
+            $enrollment->setAttribute('accessible_assignments', $assignmentsQuery->get());
+            $enrollment->setAttribute('accessible_batches', $enrollment->batch ? collect([$enrollment->batch]) : collect());
+            $enrollment->setAttribute('accessible_scorm_packages', $course->scormPackages()->get());
+            $enrollment->setAttribute('accessible_completed_lesson_ids', array_values(array_intersect($completedIds, $validLessonIds)));
+        }
 
         $submissions = AssignmentSubmission::where('user_id', $user->id)
             ->get()
@@ -340,6 +361,13 @@ class PublicController extends Controller
         $enrollment = Enrollment::where('user_id', $request->user()->id)
             ->where('course_id', $data['course_id'])
             ->where('status', 'approved')
+            ->firstOrFail();
+
+        Lesson::whereKey($data['lesson_id'])
+            ->where('course_id', $enrollment->course_id)
+            ->where(fn ($query) => $enrollment->batch_id
+                ? $query->whereNull('batch_id')->orWhere('batch_id', $enrollment->batch_id)
+                : $query->whereNull('batch_id'))
             ->firstOrFail();
 
         $ids = $enrollment->completed_lesson_ids ?? [];

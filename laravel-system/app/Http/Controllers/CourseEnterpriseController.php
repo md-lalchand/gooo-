@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\AssignmentSubmission;
+use App\Models\Batch;
 use App\Models\Certificate;
 use App\Models\Course;
 use App\Models\CourseAnnouncement;
@@ -15,6 +16,7 @@ use App\Models\ScormAttempt;
 use App\Models\ScormPackage;
 use App\Support\AuditRecorder;
 use App\Support\BrandSettings;
+use App\Support\TeacherCourseAccess;
 use Illuminate\Http\Request;
 
 class CourseEnterpriseController extends Controller
@@ -26,6 +28,7 @@ class CourseEnterpriseController extends Controller
             'title' => 'required|string|max:160',
             'description' => 'nullable|string|max:1000',
         ]);
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
         $order = CourseModule::where('course_id', $data['course_id'])->count() + 1;
         CourseModule::create([
             ...$data,
@@ -34,8 +37,9 @@ class CourseEnterpriseController extends Controller
         return back()->with('status', "Course module '{$data['title']}' added.");
     }
 
-    public function deleteModule(CourseModule $module)
+    public function deleteModule(Request $request, CourseModule $module)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $module->course_id);
         $module->delete();
         return back()->with('status', 'Course module removed.');
     }
@@ -48,6 +52,7 @@ class CourseEnterpriseController extends Controller
             'summary' => 'nullable|string|max:1000',
         ]);
         $module = CourseModule::findOrFail($data['module_id']);
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $module->course_id);
         $order = CourseChapter::where('module_id', $module->id)->count() + 1;
         CourseChapter::create([
             'module_id' => $module->id,
@@ -59,8 +64,9 @@ class CourseEnterpriseController extends Controller
         return back()->with('status', "Chapter '{$data['title']}' added.");
     }
 
-    public function deleteChapter(CourseChapter $chapter)
+    public function deleteChapter(Request $request, CourseChapter $chapter)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $chapter->course_id);
         $chapter->delete();
         return back()->with('status', 'Chapter removed.');
     }
@@ -76,6 +82,15 @@ class CourseEnterpriseController extends Controller
             'max_marks' => 'required|integer|min:1|max:500',
         ]);
 
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
+        if (!empty($data['batch_id'])) {
+            $batch = Batch::findOrFail($data['batch_id']);
+            if ((int) $batch->course_id !== (int) $data['course_id']) {
+                abort(403, 'Assignment batch must belong to the selected course.');
+            }
+            TeacherCourseAccess::assertCanManageBatch($request->user(), $batch);
+        }
+
         CourseAssignment::create([
             ...$data,
             'created_by' => $request->user()->id,
@@ -85,8 +100,10 @@ class CourseEnterpriseController extends Controller
         return back()->with('status', "Assignment '{$data['title']}' published.");
     }
 
-    public function deleteAssignment(CourseAssignment $assignment)
+    public function deleteAssignment(Request $request, CourseAssignment $assignment)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $assignment->course_id);
+        if ($assignment->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $assignment->batch);
         $assignment->delete();
         return back()->with('status', 'Assignment deleted.');
     }
@@ -94,10 +111,14 @@ class CourseEnterpriseController extends Controller
     public function submitAssignment(Request $request, CourseAssignment $assignment)
     {
         $user = $request->user();
-        $hasAccess = in_array($user->role, ['admin', 'teacher'], true) || Enrollment::where('user_id', $user->id)
+        if ($user->role === 'teacher') {
+            TeacherCourseAccess::assertCanManageCourse($user, (int) $assignment->course_id);
+        }
+        $enrollmentQuery = Enrollment::where('user_id', $user->id)
             ->where('course_id', $assignment->course_id)
-            ->where('status', 'approved')
-            ->exists();
+            ->where('status', 'approved');
+        if ($assignment->batch_id) $enrollmentQuery->where('batch_id', $assignment->batch_id);
+        $hasAccess = $user->role === 'admin' || ($user->role === 'student' && $enrollmentQuery->exists());
 
         if (!$hasAccess) {
             abort(403, 'Approved enrollment in this course is required to submit assignments.');
@@ -123,7 +144,28 @@ class CourseEnterpriseController extends Controller
     public function gradeSubmission(Request $request, AssignmentSubmission $submission)
     {
         $assignment = $submission->assignment;
-        $max = $assignment ? $assignment->max_marks : 100;
+        abort_unless($assignment, 404);
+        $actor = $request->user();
+        TeacherCourseAccess::assertCanManageCourse($actor, (int) $assignment->course_id);
+        if ($assignment->batch_id) {
+            TeacherCourseAccess::assertCanManageBatch($actor, $assignment->batch);
+        } elseif ($actor->role === 'teacher') {
+            $assignedBatchIds = Batch::where('course_id', $assignment->course_id)
+                ->where(function ($query) use ($actor) {
+                    $query->where('main_teacher_id', $actor->id)
+                        ->orWhere('assistant_teacher_id', $actor->id)
+                        ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $actor->id));
+                })->pluck('id');
+            $studentIsInAssignedBatch = Enrollment::where('user_id', $submission->user_id)
+                ->where('course_id', $assignment->course_id)
+                ->where('status', 'approved')
+                ->whereIn('batch_id', $assignedBatchIds)
+                ->exists();
+            if (!$studentIsInAssignedBatch) {
+                abort(403, 'Teachers can only grade submissions from students in their assigned batches.');
+            }
+        }
+        $max = $assignment->max_marks;
         $data = $request->validate([
             'marks_awarded' => "required|integer|min:0|max:{$max}",
             'feedback' => 'nullable|string|max:2000',
@@ -158,6 +200,7 @@ class CourseEnterpriseController extends Controller
             'pinned' => 'nullable|boolean',
         ]);
 
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
         CourseAnnouncement::create([
             'course_id' => $data['course_id'],
             'author_id' => $request->user()->id,
@@ -169,8 +212,9 @@ class CourseEnterpriseController extends Controller
         return back()->with('status', 'Course announcement posted.');
     }
 
-    public function deleteAnnouncement(CourseAnnouncement $announcement)
+    public function deleteAnnouncement(Request $request, CourseAnnouncement $announcement)
     {
+        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $announcement->course_id);
         $announcement->delete();
         return back()->with('status', 'Announcement removed.');
     }
@@ -184,6 +228,11 @@ class CourseEnterpriseController extends Controller
             'xp_reward' => 'required|integer|min:10|max:2000',
             'html_content' => 'required|string|max:30000',
         ]);
+
+        if ($request->user()->role === 'teacher') {
+            if (empty($data['course_id'])) abort(403, 'Teachers must attach SCORM packages to an assigned course.');
+            TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $data['course_id']);
+        }
 
         $safeXml = '<manifest identifier="' . htmlspecialchars($data['identifier'], ENT_XML1, 'UTF-8') . '" version="1.2"><organizations><organization identifier="org-1"><title>' . htmlspecialchars($data['title'], ENT_XML1, 'UTF-8') . '</title></organization></organizations></manifest>';
 
@@ -200,8 +249,13 @@ class CourseEnterpriseController extends Controller
         return back()->with('status', "SCORM 1.2 package '{$data['title']}' published.");
     }
 
-    public function deleteScormPackage(ScormPackage $package)
+    public function deleteScormPackage(Request $request, ScormPackage $package)
     {
+        if ($package->course_id) {
+            TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $package->course_id);
+        } elseif ($request->user()->role !== 'admin') {
+            abort(403, 'Only administrators can remove unassigned SCORM packages.');
+        }
         $package->delete();
         return back()->with('status', 'SCORM package removed.');
     }
@@ -209,6 +263,16 @@ class CourseEnterpriseController extends Controller
     public function completeScorm(Request $request, ScormPackage $package)
     {
         $user = $request->user();
+        if ($user->role === 'student') {
+            if (!$package->course_id || !Enrollment::where('user_id', $user->id)->where('course_id', $package->course_id)->where('status', 'approved')->exists()) {
+                abort(403, 'Approved enrollment in the SCORM course is required.');
+            }
+        } elseif ($user->role === 'teacher') {
+            if (!$package->course_id) abort(403, 'Teachers can only preview SCORM packages attached to assigned courses.');
+            TeacherCourseAccess::assertCanManageCourse($user, (int) $package->course_id);
+        } elseif ($user->role !== 'admin') {
+            abort(403);
+        }
         $score = max(0, min(100, (int) $request->input('score', 100)));
 
         $alreadyCompleted = ScormAttempt::where('scorm_package_id', $package->id)
@@ -243,8 +307,16 @@ class CourseEnterpriseController extends Controller
             ->where('status', 'approved')
             ->firstOrFail();
 
-        $totalLessons = $course->lessons()->count();
-        $completedCount = count($enrollment->completed_lesson_ids ?? []);
+        $lessonsQuery = $course->lessons();
+        if ($enrollment->batch_id) {
+            $lessonsQuery->where(fn ($query) => $query->whereNull('batch_id')->orWhere('batch_id', $enrollment->batch_id));
+        } else {
+            $lessonsQuery->whereNull('batch_id');
+        }
+        $validLessonIds = $lessonsQuery->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $totalLessons = count($validLessonIds);
+        $completedLessonIds = array_map('intval', $enrollment->completed_lesson_ids ?? []);
+        $completedCount = count(array_unique(array_intersect($completedLessonIds, $validLessonIds)));
         if ($totalLessons > 0 && $completedCount < $totalLessons) {
             return back()->withErrors(['certificate' => "Complete all {$totalLessons} lessons before claiming your certificate ({$completedCount}/{$totalLessons} done)."]);
         }
