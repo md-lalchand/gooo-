@@ -622,6 +622,14 @@ PHP
             $service->restoreBackupSnapshot($snapshot, 'Backup Admin', false);
 
             $this->assertDatabaseHas('plugin_custom_data', ['payload' => 'must-survive-restore']);
+
+            file_put_contents($tableFile, (string) file_get_contents($tableFile) . "{}\\n");
+            try {
+                $service->verifyBackupSnapshot($snapshot);
+                $this->fail('Tampered streamed table files must fail checksum verification.');
+            } catch (RuntimeException $exception) {
+                $this->assertStringContainsString('checksum verification failed', strtolower($exception->getMessage()));
+            }
         } finally {
             Schema::dropIfExists('plugin_custom_data');
         }
