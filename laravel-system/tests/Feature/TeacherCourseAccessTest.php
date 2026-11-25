@@ -195,6 +195,68 @@ class TeacherCourseAccessTest extends TestCase
         $this->assertSame(0, ScormPackage::where('identifier', 'FOREIGN-01')->count());
     }
 
+
+    public function test_teacher_cannot_view_or_grade_course_level_submissions_from_another_batch(): void
+    {
+        $branch = $this->makeBranch('Shared Course Branch', 'SCB');
+        $teacherA = $this->makeUser('teacher', $branch->id, 'shared.teacher.a@example.test');
+        $teacherB = $this->makeUser('teacher', $branch->id, 'shared.teacher.b@example.test');
+        $studentA = $this->makeUser('student', $branch->id, 'shared.student.a@example.test');
+        $studentB = $this->makeUser('student', $branch->id, 'shared.student.b@example.test');
+        $course = $this->makeCourse('Shared Batch Course');
+        $batchA = $this->makeBatch($course, $branch, $teacherA, 'SHARED-A');
+        $batchB = $this->makeBatch($course, $branch, $teacherB, 'SHARED-B');
+
+        Enrollment::create([
+            'user_id' => $studentA->id,
+            'course_id' => $course->id,
+            'branch_id' => $branch->id,
+            'batch_id' => $batchA->id,
+            'payment_method' => 'cash',
+            'amount_paid' => 2000,
+            'status' => 'approved',
+        ]);
+        Enrollment::create([
+            'user_id' => $studentB->id,
+            'course_id' => $course->id,
+            'branch_id' => $branch->id,
+            'batch_id' => $batchB->id,
+            'payment_method' => 'cash',
+            'amount_paid' => 2000,
+            'status' => 'approved',
+        ]);
+
+        $courseAssignment = CourseAssignment::create([
+            'course_id' => $course->id,
+            'title' => 'Shared Course Assignment',
+            'instructions' => 'Course-wide work.',
+            'max_marks' => 100,
+            'created_by' => $teacherA->id,
+        ]);
+        $foreignSubmission = AssignmentSubmission::create([
+            'assignment_id' => $courseAssignment->id,
+            'user_id' => $studentB->id,
+            'submission_text' => 'Private response from Batch B',
+            'status' => 'submitted',
+        ]);
+
+        $this->actingAs($teacherA)
+            ->patch(route('portal.submissions.grade', $foreignSubmission), [
+                'marks_awarded' => 95,
+                'feedback' => 'Reviewed',
+                'status' => 'graded',
+            ])->assertForbidden();
+
+        $response = $this->actingAs($teacherA)->get(route('portal.index'))->assertOk();
+        $response->assertViewHas('assignments', function ($assignments) use ($courseAssignment, $foreignSubmission) {
+            $visibleAssignment = $assignments->firstWhere('id', $courseAssignment->id);
+            return $visibleAssignment !== null
+                && !$visibleAssignment->submissions->contains('id', $foreignSubmission->id);
+        });
+
+        $this->assertSame('submitted', $foreignSubmission->fresh()->status);
+    }
+
     public function test_teacher_exam_and_scorm_actions_require_an_assigned_course(): void
     {
         $branchA = $this->makeBranch('Central', 'CTR');
