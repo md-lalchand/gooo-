@@ -33,10 +33,29 @@ class BatchEnterpriseController extends Controller
             'schedules' => 'required|array',
         ]);
 
+        $actor = $request->user();
+        $excludeBatchId = $data['exclude_batch_id'] ?? null;
+        $branchId = $data['branch_id'] ?? null;
+
+        if ($actor->role === 'branch') {
+            if (!$actor->branch_id) {
+                abort(403, 'Branch account is not assigned to a branch.');
+            }
+            if ($excludeBatchId) {
+                $excludedBatch = Batch::findOrFail($excludeBatchId);
+                if ((int) $excludedBatch->branch_id !== (int) $actor->branch_id) {
+                    abort(403, 'Branch accounts can only inspect schedules in their own branch.');
+                }
+            }
+            $branchId = (int) $actor->branch_id;
+        } elseif ($actor->role === 'teacher' && $excludeBatchId) {
+            Gate::authorize('view', Batch::findOrFail($excludeBatchId));
+        }
+
         $conflicts = $this->service->detectConflicts(
             $data['schedules'],
-            $data['exclude_batch_id'] ?? null,
-            $data['branch_id'] ?? null
+            $excludeBatchId,
+            $branchId
         );
 
         return response()->json(['conflicts' => $conflicts]);
@@ -113,6 +132,9 @@ class BatchEnterpriseController extends Controller
     public function promoteWaitlist(Request $request, Batch $batch, BatchWaitlist $waitlist)
     {
         Gate::authorize('update', $batch);
+        if ((int) $waitlist->batch_id !== (int) $batch->id || $waitlist->status !== 'waiting') {
+            abort(404);
+        }
         $student = User::findOrFail($waitlist->user_id);
         $enrollment = $this->service->enrollStudent($batch, $student, $request->user());
         $waitlist->update(['status' => 'promoted']);
