@@ -420,7 +420,8 @@ class BatchManagementService
     {
         if ($actor->role === 'branch') {
             $sourceBranchId = $enrollment->batch?->branch_id ?? $enrollment->branch_id;
-            if (!$actor->branch_id || (int) $sourceBranchId !== (int) $actor->branch_id || (int) $targetBatch->branch_id !== (int) $actor->branch_id) {
+            $studentBranchId = $enrollment->user?->branch_id;
+            if (!$actor->branch_id || (int) $sourceBranchId !== (int) $actor->branch_id || (int) $targetBatch->branch_id !== (int) $actor->branch_id || (int) $studentBranchId !== (int) $actor->branch_id) {
                 abort(403, 'Branch accounts can only transfer students between their own branch batches.');
             }
         }
@@ -489,8 +490,11 @@ class BatchManagementService
             abort(403, 'Branch accounts can only record attendance for their own branch batches.');
         }
 
-        $enrolledStudentIds = Enrollment::where('batch_id', $batch->id)
-            ->where('status', 'approved')
+        $enrolledStudentsQuery = Enrollment::where('batch_id', $batch->id)->where('status', 'approved');
+        if ($actor->role === 'branch') {
+            $enrolledStudentsQuery->whereHas('user', fn ($query) => $query->where('branch_id', $actor->branch_id));
+        }
+        $enrolledStudentIds = $enrolledStudentsQuery
             ->pluck('user_id')
             ->map(fn ($id) => (int) $id)
             ->all();
