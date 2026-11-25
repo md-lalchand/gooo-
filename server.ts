@@ -234,6 +234,26 @@ async function startServer() {
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '8mb' }));
 
+  // Apply a baseline abuse limit to every API endpoint, including endpoints
+  // that are added later and do not yet have a route-specific limiter.
+  app.use('/api', (req, res, next) => {
+    const authenticatedUser = getAuthenticatedUser(req);
+    const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+    const bucket = authenticatedUser
+      ? `api:${authenticatedUser.id}`
+      : `api:guest:${getClientIp(req)}`;
+    const limit = authenticatedUser
+      ? (isRead ? 300 : 120)
+      : (isRead ? 120 : 30);
+    const rate = consumePublicRateLimit(bucket, limit, 60 * 1000);
+    if (!rate.allowed) {
+      res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+      res.status(429).json({ error: 'API rate limit reached. Please retry later.' });
+      return;
+    }
+    next();
+  });
+
   const uploadsDir = path.resolve(process.cwd(), 'data', 'uploads');
   app.use('/uploads', express.static(uploadsDir, { maxAge: '7d' }));
 
