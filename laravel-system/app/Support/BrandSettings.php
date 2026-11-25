@@ -119,10 +119,20 @@ class BrandSettings
 
     public static function storeUploadedImage(UploadedFile $file, string $prefix = 'brand'): string
     {
-        $ext = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'png');
-        if (!in_array($ext, ['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif', 'ico'], true)) {
-            $ext = 'png';
+        // Never publish active document formats (especially SVG) from user uploads.
+        // Derive the stored extension from the detected content MIME, not the client filename.
+        $extensionByMime = [
+            'image/png' => 'png',
+            'image/jpeg' => 'jpg',
+            'image/webp' => 'webp',
+            'image/x-icon' => 'ico',
+            'image/vnd.microsoft.icon' => 'ico',
+        ];
+        $mime = $file->getMimeType();
+        if (!is_string($mime) || !isset($extensionByMime[$mime])) {
+            throw new \\InvalidArgumentException('Brand images must be PNG, JPEG, WebP, or ICO files. SVG and other active formats are not accepted.');
         }
+        $ext = $extensionByMime[$mime];
         $dir = public_path('uploads/branding');
         if (!is_dir($dir)) {
             mkdir($dir, 0755, true);
