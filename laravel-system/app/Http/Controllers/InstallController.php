@@ -178,7 +178,14 @@ class InstallController extends Controller
         $envLines[] = 'CACHE_STORE=database';
         $envLines[] = 'QUEUE_CONNECTION=database';
 
-        file_put_contents(base_path('.env'), implode("\n", $envLines) . "\n");
+        $envPath = base_path('.env');
+        $temporaryEnvPath = $envPath . '.install-' . bin2hex(random_bytes(8));
+        $envWritten = file_put_contents($temporaryEnvPath, implode("\n", $envLines) . "\n", LOCK_EX);
+        if ($envWritten === false || !@rename($temporaryEnvPath, $envPath)) {
+            @unlink($temporaryEnvPath);
+            return back()->withInput()->withErrors(['install' => 'Could not securely write the application environment file. Check filesystem permissions.']);
+        }
+        @chmod($envPath, 0600);
 
         config([
             'app.name' => $data['company_name'],
@@ -207,7 +214,15 @@ class InstallController extends Controller
         DB::setDefaultConnection($driver);
 
         // Non-destructive incremental migration (never wipe/drop existing tables or seed demo data)
-        Artisan::call('migrate', ['--force' => true]);
+        try {
+            $migrationExitCode = Artisan::call('migrate', ['--force' => true]);
+        } catch (\Throwable $exception) {
+            report($exception);
+            return back()->withInput()->withErrors(['db' => 'Database migrations failed. No installation lock was written; fix the database issue and retry.']);
+        }
+        if ($migrationExitCode !== 0) {
+            return back()->withInput()->withErrors(['db' => 'Database migrations failed. No installation lock was written; fix the database issue and retry.']);
+        }
 
         $logoPath = 'images/default-logo.svg';
         if ($request->hasFile('logo_file')) {
@@ -265,14 +280,15 @@ class InstallController extends Controller
             ]
         );
 
-        file_put_contents(
-            storage_path('installed.lock'),
-            json_encode([
-                'company' => $data['company_name'],
-                'version' => config('version.version', '1.0.0'),
-                'installed_at' => now()->toIso8601String(),
-            ], JSON_PRETTY_PRINT)
-        );
+        $lockContents = json_encode([
+            'company' => $data['company_name'],
+            'version' => config('version.version', '1.0.0'),
+            'installed_at' => now()->toIso8601String(),
+        ], JSON_PRETTY_PRINT);
+        if (file_put_contents(storage_path('installed.lock'), $lockContents, LOCK_EX) === false) {
+            return back()->withInput()->withErrors(['install' => 'Installation completed but the install lock could not be written. Check storage permissions before retrying.']);
+        }
+        @chmod(storage_path('installed.lock'), 0600);
 
         @unlink(storage_path('framework/install.key'));
 
