@@ -612,8 +612,11 @@ PHP
             $service = app(SystemUpdateService::class);
             $snapshot = $service->createFullBackup('Backup Admin', 'Dynamic table coverage')['snapshot'];
             $payload = json_decode((string) $snapshot->payload_json, true);
-            $this->assertArrayHasKey('plugin_custom_data', $payload['tables'] ?? []);
-            $this->assertSame('must-survive-restore', $payload['tables']['plugin_custom_data'][0]['payload'] ?? null);
+            $this->assertSame('lms-full-backup-v2-streamed', $payload['format'] ?? null);
+            $this->assertSame(1, $payload['table_counts']['plugin_custom_data'] ?? null);
+            $tableFile = storage_path('app/backups/backup-' . $snapshot->id . '-tables/plugin_custom_data.ndjson');
+            $this->assertFileExists($tableFile);
+            $this->assertStringContainsString('must-survive-restore', (string) file_get_contents($tableFile));
             DB::table('plugin_custom_data')->delete();
 
             $service->restoreBackupSnapshot($snapshot, 'Backup Admin', false);
