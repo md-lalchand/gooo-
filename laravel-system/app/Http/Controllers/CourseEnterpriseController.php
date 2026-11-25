@@ -145,8 +145,26 @@ class CourseEnterpriseController extends Controller
     {
         $assignment = $submission->assignment;
         abort_unless($assignment, 404);
-        TeacherCourseAccess::assertCanManageCourse($request->user(), (int) $assignment->course_id);
-        if ($assignment->batch_id) TeacherCourseAccess::assertCanManageBatch($request->user(), $assignment->batch);
+        $actor = $request->user();
+        TeacherCourseAccess::assertCanManageCourse($actor, (int) $assignment->course_id);
+        if ($assignment->batch_id) {
+            TeacherCourseAccess::assertCanManageBatch($actor, $assignment->batch);
+        } elseif ($actor->role === 'teacher') {
+            $assignedBatchIds = Batch::where('course_id', $assignment->course_id)
+                ->where(function ($query) use ($actor) {
+                    $query->where('main_teacher_id', $actor->id)
+                        ->orWhere('assistant_teacher_id', $actor->id)
+                        ->orWhereHas('teachers', fn ($sub) => $sub->where('user_id', $actor->id));
+                })->pluck('id');
+            $studentIsInAssignedBatch = Enrollment::where('user_id', $submission->user_id)
+                ->where('course_id', $assignment->course_id)
+                ->where('status', 'approved')
+                ->whereIn('batch_id', $assignedBatchIds)
+                ->exists();
+            if (!$studentIsInAssignedBatch) {
+                abort(403, 'Teachers can only grade submissions from students in their assigned batches.');
+            }
+        }
         $max = $assignment->max_marks;
         $data = $request->validate([
             'marks_awarded' => "required|integer|min:0|max:{$max}",
