@@ -40,6 +40,7 @@ import { createBatchEnterpriseRouter } from './src/server/batchEnterpriseRoutes'
 import { createCourseEnterpriseRouter } from './src/server/courseEnterpriseRoutes';
 import { createEnterpriseOpsRouter } from './src/server/enterpriseOpsRoutes';
 import { createPlatformRouter } from './src/server/platformRoutes';
+import { distributedApiRateLimit } from './src/server/distributedRateLimit';
 import {
   checkLoginRateLimit,
   clearLoginRateLimit,
@@ -231,7 +232,29 @@ async function startServer() {
   getDb();
 
   const app = express();
-  app.set('trust proxy', 1);
+  const trustedProxyHops = process.env.TRUST_PROXY_HOPS;
+  if (trustedProxyHops === undefined || trustedProxyHops.trim() === '') {
+    app.set('trust proxy', false);
+  } else {
+    const hops = Number(trustedProxyHops);
+    if (!Number.isSafeInteger(hops) || hops < 0 || hops > 10) {
+      throw new Error('[SECURITY] TRUST_PROXY_HOPS must be an integer from 0 to 10.');
+    }
+    app.set('trust proxy', hops);
+  }
+  // All API endpoints share Redis counters in production, including future routes.
+  app.use('/api', distributedApiRateLimit(
+    (req) => {
+      const authenticatedUser = getAuthenticatedUser(req);
+      return authenticatedUser ? `user:${authenticatedUser.id}` : `guest:${getClientIp(req)}`;
+    },
+    (req) => {
+      const authenticatedUser = getAuthenticatedUser(req);
+      const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+      return authenticatedUser ? (isRead ? 300 : 120) : (isRead ? 120 : 30);
+    }
+  ));
+
   app.use(express.json({ limit: '8mb' }));
 
   const uploadsDir = path.resolve(process.cwd(), 'data', 'uploads');
@@ -479,9 +502,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh phone number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 12)) {
+    if (!isStrongPassword(password, 10)) {
       res.status(400).json({
-        error: 'Main Admin password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
+        error: 'Main Admin password must be at least 10 characters and include both letters and numbers.',
       });
       return;
     }
@@ -571,9 +594,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 12)) {
+    if (!isStrongPassword(password, 8)) {
       res.status(400).json({
-        error: 'Password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
+        error: 'Password must be at least 8 characters and include both letters and numbers.',
       });
       return;
     }
@@ -1008,9 +1031,9 @@ async function startServer() {
   app.post('/api/auth/password-reset/confirm', (req, res) => {
     const token = String(req.body?.token ?? '').trim();
     const newPassword = String(req.body?.newPassword ?? '');
-    if (!token || !isStrongPassword(newPassword, 12)) {
+    if (!token || !isStrongPassword(newPassword, 8)) {
       res.status(400).json({
-        error: 'Valid reset token and strong new password (12+ characters with uppercase, lowercase, numbers, and symbols) are required.',
+        error: 'Valid reset token and strong new password (min 8 chars with letters and numbers) are required.',
       });
       return;
     }
@@ -1066,9 +1089,9 @@ async function startServer() {
       return;
     }
     if (newPassword.trim()) {
-      if (!isStrongPassword(newPassword.trim(), 12)) {
+      if (!isStrongPassword(newPassword.trim(), 8)) {
         res.status(400).json({
-          error: 'New password must be at least 12 characters with uppercase, lowercase, numbers, and symbols.',
+          error: 'New password must be at least 8 characters and include both letters and numbers.',
         });
         return;
       }
@@ -3946,9 +3969,9 @@ async function startServer() {
       res.status(400).json({ error: 'Enter a valid Bangladesh phone number (e.g. 017XXXXXXXX).' });
       return;
     }
-    if (!isStrongPassword(password, 12)) {
+    if (!isStrongPassword(password, 8)) {
       res.status(400).json({
-        error: 'A strong password (12+ characters with uppercase, lowercase, numbers, and symbols) is required for every new user.',
+        error: 'A strong password (min 8 chars with letters and numbers) is required for every new user.',
       });
       return;
     }
@@ -4124,7 +4147,7 @@ async function startServer() {
       target.guardianLinkedStudentIds = req.body.guardianLinkedStudentIds.map(String);
     }
     if (typeof req.body?.password === 'string' && req.body.password.trim()) {
-      if (!isStrongPassword(req.body.password.trim(), 12)) {
+      if (!isStrongPassword(req.body.password.trim(), 8)) {
         res.status(400).json({ error: 'Password must be at least 8 characters and include letters and numbers.' });
         return;
       }
