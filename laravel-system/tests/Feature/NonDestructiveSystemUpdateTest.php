@@ -615,7 +615,7 @@ PHP
             $payload = json_decode((string) $snapshot->payload_json, true);
             $this->assertSame('lms-full-backup-v2-streamed', $payload['format'] ?? null);
             $this->assertSame(1, $payload['table_counts']['plugin_custom_data'] ?? null);
-            $tableFile = storage_path('app/backups/backup-' . $snapshot->id . '-tables/plugin_custom_data.ndjson');
+            $tableFile = storage_path('app/backups/' . $payload['table_directory'] . '/plugin_custom_data.ndjson');
             $this->assertFileExists($tableFile);
             $this->assertStringContainsString('must-survive-restore', (string) file_get_contents($tableFile));
             DB::table('plugin_custom_data')->delete();
