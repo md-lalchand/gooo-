@@ -180,9 +180,12 @@ class SystemUpdateService
                 $count = 0;
                 try {
                     $query = DB::table($table);
-                    if (Schema::hasColumn($table, 'id')) {
-                        $query->orderBy('id');
+                    $columns = Schema::getColumnListing($table);
+                    $orderColumn = in_array('id', $columns, true) ? 'id' : ($columns[0] ?? null);
+                    if (!is_string($orderColumn) || $orderColumn === '') {
+                        throw new RuntimeException("Cannot determine a stable backup ordering for {$table}.");
                     }
+                    $query->orderBy($orderColumn);
                     // Paginate by a bounded batch so PDO drivers cannot buffer
                     // the entire table result set behind a lazy cursor.
                     $query->chunk(500, function ($rows) use ($handle, $hash, &$count, $table) {
