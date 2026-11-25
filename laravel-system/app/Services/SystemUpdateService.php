@@ -80,7 +80,27 @@ class SystemUpdateService
             'telescope_monitoring', 'pulse_values', 'pulse_entries',
             'pulse_aggregates',
         ];
-        $tables = array_unique(array_merge(self::BUSINESS_TABLES, Schema::getTableListing()));
+        $driver = DB::getDriverName();
+        if ($driver === 'sqlite') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->name,
+                DB::select("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            );
+        } elseif ($driver === 'mysql') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->table_name,
+                DB::select("SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'")
+            );
+        } elseif ($driver === 'pgsql') {
+            $discovered = array_map(
+                static fn ($row) => (string) $row->table_name,
+                DB::select("SELECT tablename AS table_name FROM pg_tables WHERE schemaname = current_schema()")
+            );
+        } else {
+            $discovered = Schema::getTableListing();
+        }
+
+        $tables = array_unique(array_merge(self::BUSINESS_TABLES, $discovered));
         return array_values(array_filter($tables, static function ($table) use ($ephemeral) {
             return is_string($table)
                 && preg_match('/^[A-Za-z0-9_]+$/', $table)
