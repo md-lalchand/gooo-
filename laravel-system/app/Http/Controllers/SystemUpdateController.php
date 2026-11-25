@@ -22,7 +22,7 @@ class SystemUpdateController extends Controller
 
     public function downloadBackup(BackupSnapshot $snapshot)
     {
-        $this->updater->verifyBackupSnapshot($snapshot);
+        $this->updater->verifyPortableBackupArchive($snapshot);
         $path = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
         abort_unless(is_file($path), 404, 'Portable backup archive not found.');
         $filename = 'lms-portable-backup-' . $snapshot->id . '-' . now()->format('Ymd-His') . '.zip';
