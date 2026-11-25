@@ -105,7 +105,7 @@ class SystemUpdateService
         }
     }
 
-    public function createFullBackup(string $actorName, string $label = 'Verified Full Backup'): array
+    public function createFullBackup(string $actorName, string $label = 'Verified Full Database Backup'): array
     {
         $tables = [];
         $counts = [];
@@ -135,27 +135,47 @@ class SystemUpdateService
 
         $checksum = hash('sha256', $json);
         $backupDir = storage_path('app/backups');
-        if (!is_dir($backupDir)) {
-            mkdir($backupDir, 0755, true);
+        if (!is_dir($backupDir) && !mkdir($backupDir, 0700, true) && !is_dir($backupDir)) {
+            throw new RuntimeException('Unable to create the private backup directory.');
         }
+        @chmod($backupDir, 0700);
 
         $stamp = now()->format('Ymd-His') . '-' . bin2hex(random_bytes(3));
         $fileName = "backup-{$stamp}.json";
         $fullPath = $backupDir . DIRECTORY_SEPARATOR . $fileName;
-        file_put_contents($fullPath, $json);
+        $temporaryPath = $fullPath . '.tmp';
 
-        if (is_file(base_path('.env'))) {
-            @copy(base_path('.env'), $backupDir . DIRECTORY_SEPARATOR . "env-{$stamp}.bak");
+        $written = file_put_contents($temporaryPath, $json, LOCK_EX);
+        if ($written === false || $written !== strlen($json)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Failed to write the complete database backup file.');
         }
+        @chmod($temporaryPath, 0600);
 
-        $snapshot = BackupSnapshot::create([
-            'label' => $label,
-            'reason' => 'manual',
-            'checksum_sha256' => $checksum,
-            'verified' => true,
-            'created_by' => $actorName,
-            'payload_json' => $json,
-        ]);
+        $diskPayload = file_get_contents($temporaryPath);
+        if (!is_string($diskPayload) || !hash_equals($checksum, hash('sha256', $diskPayload))) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Database backup file verification failed.');
+        }
+        if (!@rename($temporaryPath, $fullPath)) {
+            @unlink($temporaryPath);
+            throw new RuntimeException('Unable to finalize the verified database backup file.');
+        }
+        @chmod($fullPath, 0600);
+
+        try {
+            $snapshot = BackupSnapshot::create([
+                'label' => $label,
+                'reason' => 'manual',
+                'checksum_sha256' => $checksum,
+                'verified' => true,
+                'created_by' => $actorName,
+                'payload_json' => $json,
+            ]);
+        } catch (\Throwable $exception) {
+            @unlink($fullPath);
+            throw $exception;
+        }
 
         return [
             'snapshot' => $snapshot,
@@ -166,57 +186,126 @@ class SystemUpdateService
         ];
     }
 
+    public function verifyBackupSnapshot(BackupSnapshot $snapshot): array
+    {
+        if (!$snapshot->verified) {
+            throw new RuntimeException('This backup snapshot is not marked as verified. Restore/download is blocked.');
+        }
+
+        $json = (string) $snapshot->payload_json;
+        $computed = hash('sha256', $json);
+        if (!hash_equals((string) $snapshot->checksum_sha256, $computed)) {
+            throw new RuntimeException('Backup SHA-256 verification failed. Restore/download aborted.');
+        }
+
+        try {
+            $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $exception) {
+            throw new RuntimeException('Backup JSON payload is invalid.', 0, $exception);
+        }
+
+        if (!is_array($decoded)
+            || ($decoded['format'] ?? null) !== 'lms-full-backup-v1'
+            || !is_array($decoded['tables'] ?? null)
+            || !is_array($decoded['table_counts'] ?? null)
+        ) {
+            throw new RuntimeException('Unsupported or malformed backup snapshot format.');
+        }
+
+        $tablesData = $decoded['tables'];
+        $tableCounts = $decoded['table_counts'];
+        if (array_diff(array_keys($tablesData), array_keys($tableCounts))
+            || array_diff(array_keys($tableCounts), array_keys($tablesData))
+        ) {
+            throw new RuntimeException('Backup table-count manifest does not match the table payload.');
+        }
+
+        $allowedTables = array_flip(self::BUSINESS_TABLES);
+        $validatedTables = [];
+
+        foreach ($tablesData as $table => $rows) {
+            if (!isset($allowedTables[$table])) {
+                throw new RuntimeException("Backup contains an unsupported table: {$table}");
+            }
+            if (!is_array($rows) || !array_is_list($rows)) {
+                throw new RuntimeException("Backup rows for {$table} are malformed.");
+            }
+            if (!is_numeric($tableCounts[$table]) || (int) $tableCounts[$table] !== count($rows)) {
+                throw new RuntimeException("Backup row count verification failed for {$table}.");
+            }
+
+            if (!Schema::hasTable($table)) {
+                if (count($rows) > 0) {
+                    throw new RuntimeException("Cannot restore {$table}: the table is not present in the current schema.");
+                }
+                $validatedTables[$table] = [];
+                continue;
+            }
+
+            $validColumns = array_flip(Schema::getColumnListing($table));
+            $filteredRows = [];
+            foreach ($rows as $index => $row) {
+                if (!is_array($row) || array_is_list($row)) {
+                    throw new RuntimeException("Backup row {$index} for {$table} is malformed.");
+                }
+                $filtered = array_intersect_key($row, $validColumns);
+                if ($filtered === []) {
+                    throw new RuntimeException("Backup row {$index} for {$table} has no valid columns.");
+                }
+                $filteredRows[] = $filtered;
+            }
+            $validatedTables[$table] = $filteredRows;
+        }
+
+        return [
+            'payload' => $decoded,
+            'tables' => $validatedTables,
+        ];
+    }
+
     public function restoreBackupSnapshot(BackupSnapshot $snapshot, string $actorName): array
     {
-        $computed = hash('sha256', (string) $snapshot->payload_json);
-        if (!hash_equals($snapshot->checksum_sha256, $computed)) {
-            throw new RuntimeException('Backup SHA-256 verification failed. Restore aborted to protect live records.');
-        }
+        $verified = $this->verifyBackupSnapshot($snapshot);
+        $tablesData = $verified['tables'];
 
-        $decoded = json_decode((string) $snapshot->payload_json, true);
-        if (!is_array($decoded) || !isset($decoded['tables']) || !is_array($decoded['tables'])) {
-            throw new RuntimeException('Invalid backup snapshot format.');
-        }
-
+        // Preserve the current live state before any destructive restore work.
         $this->createFullBackup($actorName, "Pre-Restore Safety Snapshot (before restoring #{$snapshot->id})");
 
         $restoredCounts = [];
-        $tablesData = $decoded['tables'];
-
         DB::transaction(function () use ($tablesData, &$restoredCounts) {
             Schema::disableForeignKeyConstraints();
             try {
+                // Clear every currently supported business table. Tables absent
+                // from an older snapshot correctly return to an empty state.
                 foreach (array_reverse(self::BUSINESS_TABLES) as $table) {
-                    if (array_key_exists($table, $tablesData) && Schema::hasTable($table)) {
+                    if (Schema::hasTable($table)) {
                         DB::table($table)->delete();
                     }
                 }
 
                 foreach (self::BUSINESS_TABLES as $table) {
-                    if (!array_key_exists($table, $tablesData) || !Schema::hasTable($table)) {
+                    if (!Schema::hasTable($table)) {
                         continue;
                     }
-                    $rows = $tablesData[$table];
-                    if (empty($rows) || !is_array($rows)) {
+
+                    $rows = $tablesData[$table] ?? [];
+                    if ($rows === []) {
                         $restoredCounts[$table] = 0;
                         continue;
                     }
-                    $validCols = array_flip(Schema::getColumnListing($table));
-                    $filteredRows = array_map(
-                        static fn (array $row) => array_intersect_key($row, $validCols),
-                        $rows
-                    );
-                    foreach (array_chunk($filteredRows, 100) as $chunk) {
+
+                    foreach (array_chunk($rows, 100) as $chunk) {
                         DB::table($table)->insert($chunk);
                     }
-                    $restoredCounts[$table] = count($filteredRows);
-                    if (DB::getDriverName() === 'pgsql' && array_key_exists('id', $validCols)) {
+                    $restoredCounts[$table] = count($rows);
+
+                    if (DB::getDriverName() === 'pgsql' && Schema::hasColumn($table, 'id')) {
                         try {
                             DB::statement(
                                 "SELECT setval(pg_get_serial_sequence('{$table}', 'id'), COALESCE((SELECT MAX(id) FROM {$table}), 1))"
                             );
                         } catch (\Throwable) {
-                            // Ignore tables without serial sequences
+                            // Ignore tables without serial sequences.
                         }
                     }
                 }
@@ -240,15 +329,66 @@ class SystemUpdateService
         }
 
         $entries = [];
+        $seenPaths = [];
+        $totalUncompressedBytes = 0;
         try {
+            if ($zip->numFiles < 1 || $zip->numFiles > 10000) {
+                throw new RuntimeException('Update archive contains an invalid number of entries.');
+            }
+
             for ($i = 0; $i < $zip->numFiles; $i++) {
                 $stat = $zip->statIndex($i);
-                $name = str_replace('\\', '/', (string) ($stat['name'] ?? ''));
-                if ($name === '' || str_ends_with($name, '/')) {
-                    continue;
+                if (!is_array($stat)) {
+                    throw new RuntimeException('Unable to inspect an update archive entry.');
                 }
-                if (str_contains($name, '..') || str_contains($name, "\0") || str_starts_with($name, '/') || preg_match('/^[A-Za-z]:/', $name)) {
-                    throw new RuntimeException("Unsafe path detected inside update archive: {$name}");
+
+                $rawName = (string) ($stat['name'] ?? '');
+                $name = str_replace('\\', '/', $rawName);
+                $trimmedName = rtrim($name, '/');
+                if ($trimmedName === '' || str_contains($name, "\0") || preg_match('/[\x00-\x1F\x7F]/', $name)
+                    || str_starts_with($name, '/') || preg_match('/^[A-Za-z]:/', $name)
+                ) {
+                    throw new RuntimeException('Unsafe path detected inside update archive.');
+                }
+
+                foreach (explode('/', $trimmedName) as $segment) {
+                    if ($segment === '' || $segment === '.' || $segment === '..') {
+                        throw new RuntimeException("Unsafe path detected inside update archive: {$name}");
+                    }
+                }
+
+                $opsys = 0;
+                $attributes = 0;
+                if ($zip->getExternalAttributesIndex($i, $opsys, $attributes)
+                    && $opsys === ZipArchive::OPSYS_UNIX
+                ) {
+                    $fileType = ($attributes >> 16) & 0170000;
+                    if ($fileType === 0120000) {
+                        throw new RuntimeException("Symbolic links are not allowed in update archives: {$name}");
+                    }
+                }
+
+                if (isset($stat['encryption_method']) && (int) $stat['encryption_method'] !== 0) {
+                    throw new RuntimeException("Encrypted update archive entries are not supported: {$name}");
+                }
+
+                $size = (int) ($stat['size'] ?? 0);
+                if ($size < 0 || $size > 50 * 1024 * 1024) {
+                    throw new RuntimeException("Update archive entry exceeds the allowed uncompressed size: {$name}");
+                }
+                $totalUncompressedBytes += $size;
+                if ($totalUncompressedBytes > 250 * 1024 * 1024) {
+                    throw new RuntimeException('Update archive exceeds the 250 MB uncompressed size limit.');
+                }
+
+                $normalizedName = rtrim($name, '/');
+                if (isset($seenPaths[$normalizedName])) {
+                    throw new RuntimeException("Duplicate path detected inside update archive: {$normalizedName}");
+                }
+                $seenPaths[$normalizedName] = true;
+
+                if (str_ends_with($name, '/')) {
+                    continue;
                 }
                 $entries[] = $name;
             }
@@ -294,6 +434,7 @@ class SystemUpdateService
             'updatable_files' => $updatable,
             'protected_skipped' => $protectedSkipped,
             'checksum_sha256' => hash_file('sha256', $zipPath),
+            'total_uncompressed_bytes' => $totalUncompressedBytes,
         ];
     }
 
@@ -305,9 +446,13 @@ class SystemUpdateService
         ?callable $postCopyHook = null
     ): SystemUpdate {
         $basePath = rtrim($targetBasePath ?? base_path(), DIRECTORY_SEPARATOR);
+        if (!is_dir($basePath) || realpath($basePath) === false) {
+            throw new RuntimeException('Update target directory does not exist.');
+        }
+        $basePath = realpath($basePath);
+
         $inspection = $this->inspectUpdateZip($zipPath);
         $manifest = $inspection['manifest'];
-
         if (!empty($manifest['min_php']) && version_compare(PHP_VERSION, (string) $manifest['min_php'], '<')) {
             throw new RuntimeException("Update requires PHP {$manifest['min_php']}+ (running " . PHP_VERSION . ').');
         }
@@ -315,7 +460,6 @@ class SystemUpdateService
         $fromVersion = $this->currentVersion();
         $toVersion = trim((string) ($manifest['version'] ?? '')) ?: $this->incrementPatchVersion($fromVersion);
         $checksum = $inspection['checksum_sha256'];
-
         $backup = $this->createFullBackup($actorName, "Pre-Update Snapshot ({$fromVersion} → {$toVersion})");
 
         $stamp = now()->format('Ymd-His') . '-' . bin2hex(random_bytes(3));
@@ -323,12 +467,21 @@ class SystemUpdateService
         $rollbackDir = storage_path('app/update-rollback/' . $stamp);
         $flagPath = storage_path('framework/updating.flag');
 
-        mkdir($stagingDir, 0755, true);
-        mkdir($rollbackDir, 0755, true);
+        if (!mkdir($stagingDir, 0700, true) && !is_dir($stagingDir)) {
+            throw new RuntimeException('Unable to create update staging directory.');
+        }
+        if (!mkdir($rollbackDir, 0700, true) && !is_dir($rollbackDir)) {
+            $this->deleteDirectory($stagingDir);
+            throw new RuntimeException('Unable to create update rollback directory.');
+        }
+        @chmod($stagingDir, 0700);
+        @chmod($rollbackDir, 0700);
 
         $overwrittenFiles = [];
         $newlyCreatedFiles = [];
         $filesUpdatedCount = 0;
+        $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+        $migrationStarted = false;
 
         try {
             $zip = new ZipArchive();
@@ -336,33 +489,44 @@ class SystemUpdateService
                 throw new RuntimeException('Unable to re-open update ZIP package.');
             }
             try {
-                $zip->extractTo($stagingDir);
+                if (!$zip->extractTo($stagingDir)) {
+                    throw new RuntimeException('Unable to extract update archive into the private staging directory.');
+                }
             } finally {
                 $zip->close();
             }
+            $this->assertSafeExtractedTree($stagingDir);
 
-            file_put_contents($flagPath, "Updating {$fromVersion} -> {$toVersion} at " . now()->toIso8601String());
+            if (file_put_contents($flagPath, "Updating {$fromVersion} -> {$toVersion} at " . now()->toIso8601String(), LOCK_EX) === false) {
+                throw new RuntimeException('Unable to enable the maintenance update lock.');
+            }
 
             $prefix = $inspection['strip_prefix'];
-            $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
-
             foreach ($inspection['updatable_files'] as $relPath) {
-                $source = $stagingDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $prefix . $relPath);
+                $sourceRelative = $prefix . $relPath;
+                $source = $this->assertSafeDestinationPath($stagingDir, $sourceRelative);
                 if (!is_file($source)) {
                     continue;
                 }
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
+
+                $dest = $this->assertSafeDestinationPath($basePath, $relPath);
                 $destDir = dirname($dest);
-                if (!is_dir($destDir)) {
-                    mkdir($destDir, 0755, true);
+                if (!is_dir($destDir) && !mkdir($destDir, 0755, true) && !is_dir($destDir)) {
+                    throw new RuntimeException("Unable to create update destination directory for {$relPath}.");
                 }
+                $dest = $this->assertSafeDestinationPath($basePath, $relPath);
 
                 if (is_file($dest)) {
-                    $rbTarget = $rollbackDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                    if (!is_dir(dirname($rbTarget))) {
-                        mkdir(dirname($rbTarget), 0755, true);
+                    $rollbackRelative = $relPath;
+                    $rbTarget = $this->assertSafeDestinationPath($rollbackDir, $rollbackRelative);
+                    if (!is_dir(dirname($rbTarget)) && !mkdir(dirname($rbTarget), 0700, true) && !is_dir(dirname($rbTarget))) {
+                        throw new RuntimeException("Unable to create rollback directory for {$relPath}.");
                     }
-                    copy($dest, $rbTarget);
+                    $rbTarget = $this->assertSafeDestinationPath($rollbackDir, $rollbackRelative);
+                    if (!copy($dest, $rbTarget)) {
+                        throw new RuntimeException("Unable to preserve the original file before updating: {$relPath}");
+                    }
+                    @chmod($rbTarget, 0600);
                     $overwrittenFiles[] = $relPath;
                 } else {
                     $newlyCreatedFiles[] = $relPath;
@@ -385,7 +549,11 @@ class SystemUpdateService
                     $migrateArgs['--path'] = $migrationsDir;
                     $migrateArgs['--realpath'] = true;
                 }
-                Artisan::call('migrate', $migrateArgs);
+                $migrationStarted = true;
+                $migrationExitCode = Artisan::call('migrate', $migrateArgs);
+                if ($migrationExitCode !== 0) {
+                    throw new RuntimeException('One or more database migrations failed. The update package was not marked as applied.');
+                }
             }
 
             $ranAfter = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
@@ -416,26 +584,62 @@ class SystemUpdateService
                     Artisan::call('route:clear');
                     Artisan::call('config:clear');
                 } catch (\Throwable) {
-                    // Safe to ignore in CLI/test contexts
+                    // Safe to ignore in CLI/test contexts.
                 }
             }
 
             return $record;
         } catch (\Throwable $e) {
+            $rollbackWarnings = [];
+            $ranAfterFailure = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $newMigrations = array_values(array_diff($ranAfterFailure, $ranBefore));
+
+            if ($newMigrations !== []) {
+                try {
+                    $rollbackArgs = ['--step' => 1, '--force' => true];
+                    $migrationsDir = $basePath . DIRECTORY_SEPARATOR . 'database' . DIRECTORY_SEPARATOR . 'migrations';
+                    if ($targetBasePath !== null && is_dir($migrationsDir)) {
+                        $rollbackArgs['--path'] = $migrationsDir;
+                        $rollbackArgs['--realpath'] = true;
+                    }
+                    $rollbackExitCode = Artisan::call('migrate:rollback', $rollbackArgs);
+                    $remaining = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+                    if ($rollbackExitCode !== 0 || array_diff($remaining, $ranBefore) !== []) {
+                        throw new RuntimeException('Newly applied migrations remain after rollback.');
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = 'Automatic migration rollback failed: ' . $rollbackException->getMessage();
+                }
+            } elseif ($migrationStarted) {
+                $rollbackWarnings[] = 'The failed migration was not recorded as applied; inspect the database schema and use the pre-update backup if it changed partially.';
+            }
+
             foreach ($overwrittenFiles as $relPath) {
-                $rb = $rollbackDir . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                if (is_file($rb)) {
-                    @copy($rb, $dest);
+                try {
+                    $rb = $this->assertSafeDestinationPath($rollbackDir, $relPath);
+                    $dest = $this->assertSafeDestinationPath($basePath, $relPath);
+                    if (is_file($rb) && !copy($rb, $dest)) {
+                        $rollbackWarnings[] = "Unable to restore original file {$relPath}.";
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = "Unable to safely restore {$relPath}: " . $rollbackException->getMessage();
                 }
             }
             foreach ($newlyCreatedFiles as $relPath) {
-                $dest = $basePath . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relPath);
-                if (is_file($dest)) {
-                    @unlink($dest);
+                try {
+                    $dest = $this->assertSafeDestinationPath($basePath, $relPath);
+                    if (is_file($dest) && !@unlink($dest)) {
+                        $rollbackWarnings[] = "Unable to remove newly created file {$relPath}.";
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarnings[] = "Unable to safely remove {$relPath}: " . $rollbackException->getMessage();
                 }
             }
 
+            $notes = 'Code files rolled back after error: ' . $e->getMessage();
+            if ($rollbackWarnings !== []) {
+                $notes .= ' | ' . implode(' | ', $rollbackWarnings);
+            }
             SystemUpdate::create([
                 'from_version' => $fromVersion,
                 'to_version' => $toVersion,
@@ -445,12 +649,15 @@ class SystemUpdateService
                 'migrations_applied' => [],
                 'backup_snapshot_id' => $backup['snapshot']->id,
                 'backup_file_path' => $backup['file_path'],
-                'status' => 'rolled_back',
-                'notes' => 'Rolled back automatically after error: ' . $e->getMessage(),
+                'status' => $rollbackWarnings === [] ? 'rolled_back' : 'rollback_failed',
+                'notes' => $notes,
                 'applied_by' => $actorName,
                 'applied_at' => now(),
             ]);
 
+            if ($rollbackWarnings !== []) {
+                throw new RuntimeException($e->getMessage() . ' ' . implode(' ', $rollbackWarnings), 0, $e);
+            }
             throw $e;
         } finally {
             @unlink($flagPath);
@@ -462,14 +669,51 @@ class SystemUpdateService
     public function runPendingMigrationsSafely(string $actorName): array
     {
         $pendingBefore = $this->pendingMigrations();
+        $ranBefore = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
         $backup = $this->createFullBackup($actorName, 'Pre-Migration Safety Snapshot');
 
-        Artisan::call('migrate', ['--force' => true]);
+        try {
+            $exitCode = Artisan::call('migrate', ['--force' => true]);
+            if ($exitCode !== 0) {
+                throw new RuntimeException('One or more pending database migrations failed.');
+            }
 
-        return [
-            'backup_id' => $backup['snapshot']->id,
-            'migrations_applied' => $pendingBefore,
-        ];
+            $ranAfter = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $applied = array_values(array_diff($ranAfter, $ranBefore));
+            $stillPending = array_values(array_intersect($pendingBefore, $this->pendingMigrations()));
+            if ($stillPending !== []) {
+                throw new RuntimeException('Some migrations remain pending: ' . implode(', ', $stillPending));
+            }
+
+            return [
+                'backup_id' => $backup['snapshot']->id,
+                'migrations_applied' => $applied,
+            ];
+        } catch (\Throwable $exception) {
+            $ranAfterFailure = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+            $newMigrations = array_values(array_diff($ranAfterFailure, $ranBefore));
+            $rollbackWarning = null;
+
+            if ($newMigrations !== []) {
+                try {
+                    $rollbackExitCode = Artisan::call('migrate:rollback', ['--step' => 1, '--force' => true]);
+                    $remaining = Schema::hasTable('migrations') ? DB::table('migrations')->pluck('migration')->all() : [];
+                    if ($rollbackExitCode !== 0 || array_diff($remaining, $ranBefore) !== []) {
+                        throw new RuntimeException('Newly applied migration batch remains after rollback.');
+                    }
+                } catch (\Throwable $rollbackException) {
+                    $rollbackWarning = 'Automatic migration rollback failed: ' . $rollbackException->getMessage();
+                }
+            } else {
+                $rollbackWarning = 'The failing migration was not recorded as applied; inspect the schema for partial changes.';
+            }
+
+            $message = "Migration failed. Pre-migration backup #{$backup['snapshot']->id} was preserved. " . $exception->getMessage();
+            if ($rollbackWarning !== null) {
+                $message .= ' ' . $rollbackWarning;
+            }
+            throw new RuntimeException($message, 0, $exception);
+        }
     }
 
     public function isProtectedPath(string $relativePath): bool
@@ -499,7 +743,9 @@ class SystemUpdateService
             'storage',
             'bootstrap/cache',
             'public/uploads',
+            'public/storage',
             'vendor',
+            'node_modules',
         ]);
 
         foreach ($protected as $prefix) {
@@ -510,6 +756,78 @@ class SystemUpdateService
         }
 
         return false;
+    }
+
+
+    private function assertSafeExtractedTree(string $directory): void
+    {
+        $root = realpath($directory);
+        if ($root === false) {
+            throw new RuntimeException('Update staging directory could not be resolved.');
+        }
+
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($iterator as $item) {
+            if ($item->isLink()) {
+                throw new RuntimeException('Symbolic links are not allowed in extracted update packages.');
+            }
+            $realPath = $item->getRealPath();
+            if ($realPath === false || ($realPath !== $root && !str_starts_with($realPath, $root . DIRECTORY_SEPARATOR))) {
+                throw new RuntimeException('An extracted update path resolves outside its staging directory.');
+            }
+        }
+    }
+
+    private function assertSafeDestinationPath(string $basePath, string $relativePath): string
+    {
+        $root = realpath($basePath);
+        if ($root === false) {
+            throw new RuntimeException('Update target directory could not be resolved.');
+        }
+
+        $normalized = str_replace('\\', '/', $relativePath);
+        if ($normalized === '' || str_starts_with($normalized, '/') || preg_match('/^[A-Za-z]:/', $normalized)) {
+            throw new RuntimeException('Unsafe update destination path.');
+        }
+
+        $segments = explode('/', $normalized);
+        foreach ($segments as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                throw new RuntimeException('Unsafe update destination path.');
+            }
+        }
+
+        $fileName = array_pop($segments);
+        $cursor = $root;
+        foreach ($segments as $segment) {
+            $cursor .= DIRECTORY_SEPARATOR . $segment;
+            if (is_link($cursor)) {
+                throw new RuntimeException("Update destination contains a symbolic-link directory: {$segment}");
+            }
+            if (file_exists($cursor) && !is_dir($cursor)) {
+                throw new RuntimeException('Update destination parent is not a directory.');
+            }
+            if (is_dir($cursor)) {
+                $realDirectory = realpath($cursor);
+                if ($realDirectory === false || ($realDirectory !== $root && !str_starts_with($realDirectory, $root . DIRECTORY_SEPARATOR))) {
+                    throw new RuntimeException('Update destination resolves outside the application directory.');
+                }
+            }
+        }
+
+        $destination = $cursor . DIRECTORY_SEPARATOR . $fileName;
+        if (is_link($destination)) {
+            throw new RuntimeException('Update destination file is a symbolic link.');
+        }
+        if (file_exists($destination) && !is_file($destination)) {
+            throw new RuntimeException('Update destination is not a regular file.');
+        }
+
+        return $destination;
     }
 
     private function detectWrapperPrefix(array $entries): string
