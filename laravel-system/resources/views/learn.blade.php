@@ -11,14 +11,14 @@
         @php
             $completedIds = $enr->accessible_completed_lesson_ids ?? [];
             $totalLessons = max(1, $enr->accessible_lessons->count());
-            $progressPct = $enr->course->lessons->count() > 0 ? (int) round((count($completedIds) / $totalLessons) * 100) : 0;
+            $progressPct = $enr->accessible_lessons->count() > 0 ? (int) round((count($completedIds) / $totalLessons) * 100) : 0;
             $courseCert = ($earnedCertificates ?? collect())->get($enr->course_id);
         @endphp
         <div class="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h2 class="text-lg font-extrabold text-slate-900">{{ $enr->course->title }}</h2>
-                    <p class="text-xs text-slate-500">Completion: {{ count($completedIds) }}/{{ $enr->course->lessons->count() }} lessons ({{ $progressPct }}%)</p>
+                    <p class="text-xs text-slate-500">Completion: {{ count($completedIds) }}/{{ $enr->accessible_lessons->count() }} lessons ({{ $progressPct }}%)</p>
                 </div>
                 <div class="flex items-center gap-2">
                     @if($courseCert)
@@ -31,7 +31,7 @@
                             <button type="submit" class="rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-bold">Claim Certificate</button>
                         </form>
                     @endif
-                    <span class="text-xs font-bold uppercase text-emerald-700">{{ $enr->course->lessons->count() }} Classes</span>
+                    <span class="text-xs font-bold uppercase text-emerald-700">{{ $enr->accessible_lessons->count() }} Classes</span>
                 </div>
             </div>
 
@@ -53,7 +53,7 @@
 
             @if($enr->accessible_batches->count())
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    @foreach($enr->course->batches as $bat)
+                    @foreach($enr->accessible_batches as $bat)
                         <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
                             <p class="font-extrabold text-slate-900">{{ $bat->name }} ({{ $bat->code }})</p>
                             <p class="text-slate-600 mt-0.5">{{ $bat->schedule }} · {{ $bat->mode }}</p>
@@ -63,7 +63,7 @@
             @endif
 
             <div class="space-y-2.5">
-                @forelse($enr->course->lessons as $l)
+                @forelse($enr->accessible_lessons as $l)
                     @php $done = in_array((int) $l->id, $completedIds, true); @endphp
                     <div class="border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
                         <div>
@@ -103,8 +103,8 @@
 
             @if($enr->accessible_assignments->count())
                 <div class="border-t border-slate-100 pt-4 space-y-3">
-                    <h3 class="text-sm font-extrabold text-slate-900">Assignments ({{ $enr->course->assignments->count() }})</h3>
-                    @foreach($enr->course->assignments as $asg)
+                    <h3 class="text-sm font-extrabold text-slate-900">Assignments ({{ $enr->accessible_assignments->count() }})</h3>
+                    @foreach($enr->accessible_assignments as $asg)
                         @php $sub = ($submissions ?? collect())->get($asg->id); @endphp
                         <div class="rounded-xl border border-slate-200 p-4 text-xs space-y-2">
                             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -134,7 +134,7 @@
             @if($enr->accessible_scorm_packages->count())
                 <div class="border-t border-slate-100 pt-4 space-y-2">
                     <h3 class="text-sm font-extrabold text-slate-900">Interactive SCORM Activities</h3>
-                    @foreach($enr->course->scormPackages as $pkg)
+                    @foreach($enr->accessible_scorm_packages as $pkg)
                         @php $scormDone = in_array($pkg->id, $completedScormIds ?? [], true); @endphp
                         <div class="rounded-xl border border-slate-200 p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
                             <div>
