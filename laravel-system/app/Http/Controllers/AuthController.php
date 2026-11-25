@@ -242,9 +242,9 @@ class AuthController extends Controller
                 return null;
             }
 
+            $user->forceFill(['remember_token' => Str::random(60)])->save();
             $user->update([
                 'password' => Hash::make($data['password']),
-                'remember_token' => Str::random(60),
                 'password_reset_token_hash' => null,
                 'password_reset_expires_at' => null,
             ]);
