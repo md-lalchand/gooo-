@@ -40,7 +40,7 @@ import { createBatchEnterpriseRouter } from './src/server/batchEnterpriseRoutes'
 import { createCourseEnterpriseRouter } from './src/server/courseEnterpriseRoutes';
 import { createEnterpriseOpsRouter } from './src/server/enterpriseOpsRoutes';
 import { createPlatformRouter } from './src/server/platformRoutes';
-import { distributedApiRateLimit } from './src/server/distributedRateLimit';
+import { assertProductionRateLimitReady, distributedApiRateLimit } from './src/server/distributedRateLimit';
 import {
   checkLoginRateLimit,
   clearLoginRateLimit,
@@ -221,6 +221,7 @@ function hasValidImageMagicBytes(
 
 async function startServer() {
   resolveSessionSecret();
+  await assertProductionRateLimitReady();
   try {
     await initPostgresIfConfigured();
   } catch (err) {
