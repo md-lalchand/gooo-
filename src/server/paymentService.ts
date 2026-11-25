@@ -18,6 +18,7 @@ import type {
   PaymentTransaction,
 } from '../types';
 import { resolveSessionSecret } from './security';
+import { resolvePaymentWebhookSecret } from './paymentWebhookSecurity';
 import { getDb, recordAuditLog, saveDb } from './store';
 import type { StoredUser } from './storeTypes';
 import { dispatchRealCommunication } from './communicationService';
@@ -52,10 +53,12 @@ export function computeWebhookSignature(payloadString: string, gateway: string):
         ? 'sslcommerz'
         : 'bkash';
   const secrets = getDecryptedIntegrationSecrets(key);
-  const webhookSecret =
-    secrets.webhookSecret ||
-    process.env.PAYMENT_WEBHOOK_SECRET ||
-    `${resolveSessionSecret()}:sandbox-webhook`;
+  const webhookSecret = resolvePaymentWebhookSecret(
+    secrets.webhookSecret,
+    process.env.PAYMENT_WEBHOOK_SECRET,
+    process.env.NODE_ENV,
+    process.env.NODE_ENV === 'production' ? null : `${resolveSessionSecret()}:sandbox-webhook`
+  );
   return crypto.createHmac('sha256', webhookSecret).update(payloadString).digest('hex');
 }
 
@@ -65,10 +68,15 @@ export function verifyWebhookSignature(
   providedSignature: string
 ): boolean {
   if (!providedSignature) return false;
-  const expected = computeWebhookSignature(payloadString, gateway);
-  const a = Buffer.from(providedSignature.trim());
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  try {
+    const expected = computeWebhookSignature(payloadString, gateway);
+    const a = Buffer.from(providedSignature.trim());
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    // Missing production secrets must reject the webhook, never downgrade to a session secret.
+    return false;
+  }
 }
 
 export function initiateServerPaymentSession(params: {
