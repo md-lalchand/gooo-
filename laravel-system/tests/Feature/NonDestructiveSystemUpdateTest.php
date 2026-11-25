@@ -40,6 +40,7 @@ class NonDestructiveSystemUpdateTest extends TestCase
         $this->lockPath = storage_path('installed.lock');
         $this->envPath = base_path('.env');
         $this->versionJsonPath = base_path('version.json');
+        putenv('BACKUP_ENCRYPTION_KEY=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=');
 
         if (is_file($this->lockPath)) {
             $this->originalLock = file_get_contents($this->lockPath) ?: '';
