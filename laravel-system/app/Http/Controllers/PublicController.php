@@ -342,6 +342,8 @@ class PublicController extends Controller
             ->where('status', 'approved')
             ->firstOrFail();
 
+        Lesson::whereKey($data['lesson_id'])->where('course_id', $enrollment->course_id)->firstOrFail();
+
         $ids = $enrollment->completed_lesson_ids ?? [];
         if (!in_array((int) $data['lesson_id'], $ids, true)) {
             $ids[] = (int) $data['lesson_id'];
