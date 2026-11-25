@@ -179,15 +179,23 @@ class SystemUpdateService
                 $hash = hash_init('sha256');
                 $count = 0;
                 try {
-                    foreach (DB::table($table)->cursor() as $row) {
-                        $line = json_encode((array) $row, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n";
-                        $written = fwrite($handle, $line);
-                        if ($written !== strlen($line)) {
-                            throw new RuntimeException("Incomplete streamed backup write for {$table}.");
-                        }
-                        hash_update($hash, $line);
-                        $count++;
+                    $query = DB::table($table);
+                    if (Schema::hasColumn($table, 'id')) {
+                        $query->orderBy('id');
                     }
+                    // Paginate by a bounded batch so PDO drivers cannot buffer
+                    // the entire table result set behind a lazy cursor.
+                    $query->chunk(500, function ($rows) use ($handle, $hash, &$count, $table) {
+                        foreach ($rows as $row) {
+                            $line = json_encode((array) $row, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n";
+                            $written = fwrite($handle, $line);
+                            if ($written !== strlen($line)) {
+                                throw new RuntimeException("Incomplete streamed backup write for {$table}.");
+                            }
+                            hash_update($hash, $line);
+                            $count++;
+                        }
+                    });
                 } finally {
                     fclose($handle);
                 }
