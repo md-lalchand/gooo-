@@ -43,6 +43,22 @@ Once installed on your live domain, future application updates can be applied di
    ```
    Alongside any changed `app/`, `resources/`, `routes/`, `config/`, or new incremental `database/migrations/` files.
 
+## SMTP Email Delivery & Password Recovery
+The self-service recovery flow emails a cryptographically random, single-use token to the account's registered email address. Configure a production SMTP transport before enabling live account recovery. Example environment values:
+
+```dotenv
+MAIL_MAILER=smtp
+MAIL_HOST=mail.example.com
+MAIL_PORT=587
+MAIL_USERNAME=your-mailbox@example.com
+MAIL_PASSWORD=your-mailbox-password
+MAIL_ENCRYPTION=tls
+MAIL_FROM_ADDRESS=noreply@example.com
+MAIL_FROM_NAME="Aloms English Center"
+```
+
+Keep mail credentials only in the server `.env`; never commit them. The recovery token expires after 60 minutes and is stored as a SHA-256 hash.
+
 ## Unified Portal Roles
 - `admin` — Full system, branding, CMS, system updates, account approvals, courses, batches, users, finance, store, exams & certificates
 - `branch` — Branch-scoped admissions, batches, fee approvals, orders & students (self-registered pending Main Admin approval)

@@ -2,9 +2,9 @@ name: CI & Release Verification
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'laravel/**']
   pull_request:
-    branches: [main, master]
+    branches: [main, master, 'security/laravel-production-hardening']
 
 jobs:
   node-and-frontend:

@@ -4,11 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Models\Branch;
 use App\Models\User;
+use App\Notifications\PasswordRecoveryToken;
 use App\Support\BrandSettings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 
 class AuthController extends Controller
 {
@@ -96,7 +98,7 @@ class AuthController extends Controller
             'branch_code' => 'nullable|string|max:32',
             'branch_city' => 'nullable|string|max:80',
             'branch_address' => 'nullable|string|max:240',
-            'password' => 'required|string|min:6',
+            'password' => ['required', 'string', Password::min(12)->mixedCase()->numbers()->symbols()],
         ]);
 
         $linkedStudent = null;
@@ -194,16 +196,22 @@ class AuthController extends Controller
 
         $user = User::where('email', strtolower(trim($data['email'])))->first();
         if ($user && (empty($data['expected_role']) || $user->role === $data['expected_role'])) {
-            $rawToken = strtoupper(bin2hex(random_bytes(5)));
+            $rawToken = strtoupper(bin2hex(random_bytes(32)));
             $user->update([
                 'password_reset_token_hash' => hash('sha256', $rawToken),
                 'password_reset_expires_at' => now()->addHour(),
             ]);
+
+            try {
+                $user->notify(new PasswordRecoveryToken($rawToken));
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
         }
 
         return redirect()
             ->route('recover', ['role' => $data['expected_role'] ?? 'student'])
-            ->with('status', 'If a matching account exists, a recovery token has been issued. Contact the Main Admin if you need assisted token issuance.');
+            ->with('status', 'If a matching account exists, recovery instructions will be sent to its registered email address.');
     }
 
     public function confirmPasswordReset(Request $request)

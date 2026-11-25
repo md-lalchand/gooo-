@@ -157,8 +157,8 @@
                 @endif
 
                 <div>
-                    <label for="reg_password" class="block text-xs font-semibold text-slate-700 mb-1">Password (6+ chars)</label>
-                    <input id="reg_password" type="password" name="password" required minlength="6" placeholder="Create password" class="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm">
+                    <label for="reg_password" class="block text-xs font-semibold text-slate-700 mb-1">Password (12+ chars)</label>
+                    <input id="reg_password" type="password" name="password" required minlength="12" placeholder="Create a strong password" class="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm">
                 </div>
                 <button type="submit" class="w-full rounded-xl text-white font-bold py-3 text-sm" style="background-color: var(--brand-accent)">Submit {{ $roleMeta[$activeRole]['label'] }} Registration for Approval</button>
             </form>
@@ -168,7 +168,7 @@
                     @csrf
                     <input type="hidden" name="expected_role" value="{{ $activeRole }}">
                     <h2 class="text-sm font-extrabold text-slate-900">1. Request Recovery Token ({{ $roleMeta[$activeRole]['label'] }})</h2>
-                    <p class="text-xs text-slate-500">Generates a 1-hour recovery token. Contact your Main Admin to retrieve your issued recovery token if SMTP mail is not enabled.</p>
+                    <p class="text-xs text-slate-500">A secure one-time recovery token will be sent to your registered email address. Configure SMTP mail delivery in your server environment to receive it.</p>
                     <input type="email" name="email" required value="{{ old('email') }}" placeholder="Registered email" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <button type="submit" class="w-full rounded-xl text-white font-bold py-2.5 text-xs" style="background-color: var(--brand-primary)">Request Recovery Token</button>
                 </form>
@@ -179,7 +179,7 @@
                     <h2 class="text-sm font-extrabold text-slate-900">2. Confirm Token &amp; Set New Password</h2>
                     <input type="email" name="email" required value="{{ old('email') }}" placeholder="Registered email" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <input type="text" name="token" required value="{{ old('token') }}" placeholder="Recovery Token" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm uppercase font-mono">
-                    <input type="password" name="password" required minlength="6" placeholder="New Password (6+ chars)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                    <input type="password" name="password" required minlength="12" placeholder="New Password (12+ chars)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <button type="submit" class="w-full rounded-xl text-white font-bold py-2.5 text-xs" style="background-color: var(--brand-accent)">Reset Password</button>
                 </form>
             </div>

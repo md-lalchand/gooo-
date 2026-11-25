@@ -12,6 +12,8 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Notification;
+use App\Notifications\PasswordRecoveryToken;
 use Tests\TestCase;
 
 class SecurityAuditAndPaymentWebhookTest extends TestCase
@@ -40,6 +42,49 @@ class SecurityAuditAndPaymentWebhookTest extends TestCase
             @unlink($this->lockPath);
         }
         parent::tearDown();
+    }
+
+
+
+    public function test_registration_rejects_weak_passwords(): void
+    {
+        $this->post(route('register.post'), [
+            'name' => 'Weak Password User',
+            'email' => 'weak-password@student.example',
+            'phone' => '01710000000',
+            'role' => 'student',
+            'password' => 'short',
+        ])->assertSessionHasErrors('password');
+
+        $this->assertDatabaseMissing('users', ['email' => 'weak-password@student.example']);
+    }
+
+    public function test_self_service_password_recovery_emails_a_long_one_time_token(): void
+    {
+        Notification::fake();
+
+        $user = User::create([
+            'name' => 'Recovery Student',
+            'email' => 'recovery@student.example',
+            'role' => 'student',
+            'status' => 'active',
+            'password' => Hash::make('ExistingPass123!'),
+        ]);
+
+        $this->post(route('recover.request'), [
+            'email' => $user->email,
+            'expected_role' => 'student',
+        ])->assertRedirect(route('recover', ['role' => 'student']));
+
+        $user->refresh();
+        $this->assertNotEmpty($user->password_reset_token_hash);
+        $this->assertNotNull($user->password_reset_expires_at);
+        Notification::assertSentTo($user, PasswordRecoveryToken::class, function (PasswordRecoveryToken $notification) use ($user): bool {
+            $rawTokenHash = $notification->tokenHash();
+
+            return strlen($rawTokenHash) === 64
+                && hash_equals($rawTokenHash, $user->password_reset_token_hash);
+        });
     }
 
     public function test_guardian_registration_requires_student_phone_or_hmac_linking_code(): void
