@@ -36,6 +36,40 @@ class InstallController extends Controller
 
     public function install(Request $request)
     {
+        $lockPath = storage_path('framework/install.lock');
+        $lockDirectory = dirname($lockPath);
+
+        if (!is_dir($lockDirectory) && !mkdir($lockDirectory, 0700, true) && !is_dir($lockDirectory)) {
+            return back()->withInput()->withErrors(['install' => 'Unable to initialize the installer lock. Check storage permissions.']);
+        }
+
+        $lockHandle = @fopen($lockPath, 'c');
+        if ($lockHandle === false) {
+            return back()->withInput()->withErrors(['install' => 'Unable to open the installer lock. Check storage permissions.']);
+        }
+        @chmod($lockPath, 0600);
+
+        if (!flock($lockHandle, LOCK_EX | LOCK_NB)) {
+            fclose($lockHandle);
+            return response('Installation is already running. Please wait and retry.', 409)
+                ->header('Retry-After', '10');
+        }
+
+        try {
+            clearstatcache(true, storage_path('installed.lock'));
+            if (file_exists(storage_path('installed.lock'))) {
+                return redirect()->route('home');
+            }
+
+            return $this->performInstall($request);
+        } finally {
+            flock($lockHandle, LOCK_UN);
+            fclose($lockHandle);
+        }
+    }
+
+    private function performInstall(Request $request)
+    {
         if (file_exists(storage_path('installed.lock'))) {
             return redirect()->route('home');
         }
