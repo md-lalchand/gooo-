@@ -14,6 +14,10 @@ async function getRedisClient(): Promise<RedisClientType> {
     client.on('error', (error) => {
       console.error('[SECURITY] Redis rate-limit connection error:', error.message);
     });
+    client.on('end', () => {
+      client = null;
+      connecting = null;
+    });
     connecting = client.connect().then(() => client as RedisClientType).catch((error) => {
       connecting = null;
       client = null;
