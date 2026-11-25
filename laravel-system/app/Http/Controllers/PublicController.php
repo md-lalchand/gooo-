@@ -261,38 +261,59 @@ class PublicController extends Controller
             'status' => 'required|string|in:SUCCESS,VALID,COMPLETED',
         ]);
 
-        $enrollment = Enrollment::with(['course', 'user'])->findOrFail($data['enrollment_id']);
+        $enrollment = Enrollment::findOrFail($data['enrollment_id']);
         if ((int) $data['amount'] !== (int) $enrollment->amount_paid) {
             return response()->json(['error' => 'Webhook amount mismatch.'], 400);
         }
 
-        if ($enrollment->status === 'approved') {
-            return response()->json(['ok' => true, 'deduplicated' => true, 'enrollment_id' => $enrollment->id]);
-        }
-
         $cleanTrx = strtoupper(trim($data['trx_id']));
-        if (Enrollment::where('trx_id', $cleanTrx)->where('id', '!=', $enrollment->id)->exists()) {
-            return response()->json(['error' => 'Duplicate Transaction ID rejected.'], 409);
-        }
+        $settlement = DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
+            // The conditional status update is the atomic claim on this enrollment.
+            // Concurrent callbacks can only move pending -> approved once.
+            $updated = Enrollment::whereKey($enrollment->id)
+                ->where('status', 'pending')
+                ->update([
+                    'status' => 'approved',
+                    'trx_id' => $cleanTrx,
+                    'updated_at' => now(),
+                ]);
 
-        DB::transaction(function () use ($enrollment, $cleanTrx, $gateway) {
-            $enrollment->update([
-                'status' => 'approved',
-                'trx_id' => $cleanTrx,
-            ]);
-            if ($enrollment->course) {
-                $enrollment->course->increment('enrolled_count');
+            if ($updated === 0) {
+                $current = Enrollment::findOrFail($enrollment->id);
+                return $current->status === 'approved' ? 'deduplicated' : 'not_pending';
+            }
+
+            if (Enrollment::where('trx_id', $cleanTrx)
+                ->where('id', '!=', $enrollment->id)
+                ->exists()
+            ) {
+                // Throwing rolls back the pending -> approved claim as well.
+                throw new \\DomainException('Duplicate Transaction ID rejected.');
+            }
+
+            $settled = Enrollment::with(['course', 'user'])->findOrFail($enrollment->id);
+            if ($settled->course) {
+                $settled->course->increment('enrolled_count');
             }
             FinancialRecord::create([
                 'type' => 'income',
                 'category' => 'Verified Gateway Payment',
-                'title' => "{$gateway} ({$enrollment->invoice_no}) — {$enrollment->user?->name}",
-                'amount' => $enrollment->amount_paid,
-                'branch_id' => $enrollment->branch_id,
+                'title' => "{$gateway} ({$settled->invoice_no}) — {$settled->user?->name}",
+                'amount' => $settled->amount_paid,
+                'branch_id' => $settled->branch_id,
                 'entry_date' => now()->toDateString(),
                 'recorded_by' => "{$gateway} Webhook",
             ]);
+
+            return 'approved';
         });
+
+        if ($settlement === 'deduplicated') {
+            return response()->json(['ok' => true, 'deduplicated' => true, 'enrollment_id' => $enrollment->id]);
+        }
+        if ($settlement === 'not_pending') {
+            return response()->json(['error' => 'Enrollment is not awaiting payment.'], 409);
+        }
 
         return response()->json(['ok' => true, 'enrollment_id' => $enrollment->id, 'status' => 'approved']);
     }
