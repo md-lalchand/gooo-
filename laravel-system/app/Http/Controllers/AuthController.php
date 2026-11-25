@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rules\Password;
+use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
@@ -219,34 +220,44 @@ class AuthController extends Controller
         $data = $request->validate([
             'email' => 'required|email',
             'token' => 'required|string|min:6|max:64',
-            'password' => 'required|string|min:6',
+            'password' => ['required', 'string', Password::min(12)->mixedCase()->numbers()->symbols()],
             'expected_role' => 'nullable|in:admin,branch,teacher,student,guardian',
         ]);
 
-        $user = User::where('email', strtolower(trim($data['email'])))->first();
-        if (
-            !$user ||
-            (!empty($data['expected_role']) && $user->role !== $data['expected_role']) ||
-            empty($user->password_reset_token_hash) ||
-            !$user->password_reset_expires_at ||
-            now()->greaterThan($user->password_reset_expires_at)
-        ) {
+        $reset = DB::transaction(function () use ($data) {
+            $user = User::where('email', strtolower(trim($data['email'])))->lockForUpdate()->first();
+
+            if (
+                !$user ||
+                (!empty($data['expected_role']) && $user->role !== $data['expected_role']) ||
+                empty($user->password_reset_token_hash) ||
+                !$user->password_reset_expires_at ||
+                now()->greaterThan($user->password_reset_expires_at)
+            ) {
+                return null;
+            }
+
+            $candidateHash = hash('sha256', strtoupper(trim($data['token'])));
+            if (!hash_equals($user->password_reset_token_hash, $candidateHash)) {
+                return null;
+            }
+
+            $user->update([
+                'password' => Hash::make($data['password']),
+                'remember_token' => Str::random(60),
+                'password_reset_token_hash' => null,
+                'password_reset_expires_at' => null,
+            ]);
+
+            return $user;
+        });
+
+        if (!$reset) {
             return back()->withInput()->withErrors(['token' => 'Invalid or expired recovery token.']);
         }
-
-        $candidateHash = hash('sha256', strtoupper(trim($data['token'])));
-        if (!hash_equals($user->password_reset_token_hash, $candidateHash)) {
-            return back()->withInput()->withErrors(['token' => 'Invalid or expired recovery token.']);
-        }
-
-        $user->update([
-            'password' => Hash::make($data['password']),
-            'password_reset_token_hash' => null,
-            'password_reset_expires_at' => null,
-        ]);
 
         return redirect()
-            ->route('login', ['role' => $user->role])
+            ->route('login', ['role' => $reset->role])
             ->with('status', 'Password updated successfully. You may now sign in.');
     }
 
