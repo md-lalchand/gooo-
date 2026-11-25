@@ -49,6 +49,65 @@ class InstallerWizardTest extends TestCase
         parent::tearDown();
     }
 
+
+    public function test_installer_rejects_weak_super_admin_password(): void
+    {
+        $this->post('/install/run', [
+            'company_name' => 'Secure Academy',
+            'app_url' => 'https://secure.example.com',
+            'support_email' => 'support@secure.example.com',
+            'currency_symbol' => '৳',
+            'roll_prefix' => 'SEC',
+            'db_connection' => 'sqlite',
+            'db_database' => $this->sqliteTestPath,
+            'admin_name' => 'Admin User',
+            'admin_email' => 'admin@secure.example.com',
+            'admin_password' => 'weakpass',
+        ])->assertSessionHasErrors('admin_password');
+
+        $this->assertFileDoesNotExist($this->lockPath);
+    }
+
+    public function test_postgres_verify_full_requires_a_readable_ca_certificate(): void
+    {
+        $this->post('/install/run', [
+            'company_name' => 'Secure Academy',
+            'app_url' => 'https://secure.example.com',
+            'support_email' => 'support@secure.example.com',
+            'currency_symbol' => '৳',
+            'roll_prefix' => 'SEC',
+            'db_connection' => 'pgsql',
+            'db_database' => 'academy_lms',
+            'db_host' => 'db.example.com',
+            'db_sslmode' => 'verify-full',
+            'admin_name' => 'Admin User',
+            'admin_email' => 'admin@secure.example.com',
+            'admin_password' => 'SecureAdmin123!',
+        ])->assertSessionHasErrors('db_sslrootcert');
+
+        $this->assertFileDoesNotExist($this->lockPath);
+    }
+
+    public function test_remote_mysql_tls_requires_a_ca_certificate(): void
+    {
+        $this->post('/install/run', [
+            'company_name' => 'Secure Academy',
+            'app_url' => 'https://secure.example.com',
+            'support_email' => 'support@secure.example.com',
+            'currency_symbol' => '৳',
+            'roll_prefix' => 'SEC',
+            'db_connection' => 'mysql',
+            'db_database' => 'academy_lms',
+            'db_host' => 'db.example.com',
+            'db_sslmode' => 'require',
+            'admin_name' => 'Admin User',
+            'admin_email' => 'admin@secure.example.com',
+            'admin_password' => 'SecureAdmin123!',
+        ])->assertSessionHasErrors('db_ssl_ca');
+
+        $this->assertFileDoesNotExist($this->lockPath);
+    }
+
     public function test_uninstalled_app_redirects_to_install_wizard_and_completes_clean_white_label_setup(): void
     {
         $this->get('/')->assertRedirect(route('install.index'));
