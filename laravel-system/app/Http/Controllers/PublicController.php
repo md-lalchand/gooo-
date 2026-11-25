@@ -335,7 +335,7 @@ class PublicController extends Controller
 
             return 'approved';
             });
-        } catch (\\Illuminate\\Database\\QueryException $exception) {
+        } catch (\Illuminate\Database\QueryException $exception) {
             // The database unique index is the final arbiter for two concurrent
             // callbacks that race past the application-level duplicate check.
             if (Enrollment::where('trx_id', $cleanTrx)
