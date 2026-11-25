@@ -76,7 +76,7 @@ class SystemUpdateService
     {
         $ephemeral = [
             'cache', 'cache_locks', 'sessions', 'jobs', 'job_batches',
-            'failed_jobs', 'telescope_entries', 'telescope_entries_tags',
+            'failed_jobs', 'backup_snapshots', 'telescope_entries', 'telescope_entries_tags',
             'telescope_monitoring', 'pulse_values', 'pulse_entries',
             'pulse_aggregates',
         ];
