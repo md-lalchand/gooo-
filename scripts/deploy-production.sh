@@ -30,7 +30,7 @@ DEPLOY_SUCCEEDED=0
 on_exit() {
   status=$?
   if [[ "$DEPLOY_SUCCEEDED" -ne 1 ]]; then
-    echo "Deployment did not complete successfully; keeping Laravel in maintenance mode." >&2
+    echo "Deployment failed from release $PREVIOUS_SHA; keeping Laravel in maintenance mode." >&2
     php artisan down --retry=60 || true
   fi
   exit "$status"
@@ -48,7 +48,7 @@ php artisan config:cache
 php artisan view:cache
 
 cd "$DEPLOY_PATH"
-npm ci
+npm install --no-package-lock
 npm run lint
 npm run build
 
