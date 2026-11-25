@@ -193,6 +193,50 @@ class BranchTenantIsolationTest extends TestCase
         $this->assertDatabaseMissing('batches', ['code' => 'FOREIGN-01']);
     }
 
+
+    public function test_unassigned_branch_account_cannot_access_batches_or_probe_another_branch_schedule(): void
+    {
+        $branchA = $this->makeBranch('Local Branch', 'LOC');
+        $branchB = $this->makeBranch('Remote Branch', 'REM');
+        $unassignedBranchUser = $this->makeUser('branch', null, 'unassigned.manager@example.test');
+        $admin = $this->makeUser('admin', null, 'schedule.admin@example.test');
+        $course = $this->makeCourse();
+
+        app(BatchManagementService::class)->createOrUpdateEnterpriseBatch([
+            'course_id' => $course->id,
+            'name' => 'Remote Schedule',
+            'code' => 'REMOTE-ROOM-01',
+            'branch_id' => $branchB->id,
+            'schedules' => [
+                ['day_of_week' => 'Mon', 'start_time' => '09:00', 'end_time' => '10:00', 'room_label' => 'Private Room B'],
+            ],
+        ], $admin);
+
+        $this->actingAs($unassignedBranchUser)
+            ->get(route('portal.batches.dashboard'))
+            ->assertOk()
+            ->assertJsonCount(0, 'batches');
+
+        $this->actingAs($unassignedBranchUser)
+            ->post(route('portal.batches.enterprise.store'), [
+                'course_id' => $course->id,
+                'name' => 'Unassigned Branch Batch',
+                'code' => 'UNASSIGNED-01',
+            ])->assertForbidden();
+
+        $assignedBranchUser = $this->makeUser('branch', $branchA->id, 'local.manager@example.test');
+        $response = $this->actingAs($assignedBranchUser)
+            ->post(route('portal.batches.conflicts'), [
+                'branch_id' => $branchB->id,
+                'schedules' => [
+                    ['day_of_week' => 'Mon', 'start_time' => '09:15', 'end_time' => '09:45', 'room_label' => 'Private Room B'],
+                ],
+            ])
+            ->assertOk();
+
+        $this->assertSame([], $response->json('conflicts'));
+    }
+
     public function test_branch_dashboard_activity_feed_is_scoped_to_its_own_branch(): void
     {
         $branchA = $this->makeBranch('Uptown Branch', 'UPT');
