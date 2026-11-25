@@ -379,6 +379,43 @@ class SystemUpdateService
         ];
     }
 
+    public function verifyPortableBackupArchive(BackupSnapshot $snapshot): void
+    {
+        $this->verifyBackupSnapshot($snapshot);
+        $archivePath = storage_path('app/backups/backup-' . $snapshot->id . '.zip');
+        if (!is_file($archivePath)) {
+            throw new RuntimeException('Portable backup archive is missing.');
+        }
+        $zip = new ZipArchive();
+        if ($zip->open($archivePath) !== true) {
+            throw new RuntimeException('Portable backup archive cannot be opened.');
+        }
+        try {
+            $manifestJson = $zip->getFromName('manifest.json');
+            $manifest = is_string($manifestJson) ? json_decode($manifestJson, true) : null;
+            if (!is_array($manifest)
+                || ($manifest['format'] ?? null) !== 'lms-portable-backup-v1'
+                || (int) ($manifest['snapshot_id'] ?? 0) !== (int) $snapshot->id
+                || !is_array($manifest['entries'] ?? null)
+            ) {
+                throw new RuntimeException('Portable backup manifest is invalid.');
+            }
+            foreach ($manifest['entries'] as $name => $expectedHash) {
+                if (!is_string($name) || str_starts_with($name, '/') || str_contains($name, '..')
+                    || str_contains($name, '\\') || !is_string($expectedHash)
+                ) {
+                    throw new RuntimeException('Portable backup contains an unsafe entry path.');
+                }
+                $content = $zip->getFromName($name);
+                if (!is_string($content) || !hash_equals($expectedHash, hash('sha256', $content))) {
+                    throw new RuntimeException("Portable backup checksum verification failed for {$name}.");
+                }
+            }
+        } finally {
+            $zip->close();
+        }
+    }
+
     public function restorePortableBackup(BackupSnapshot $snapshot, string $actorName): array
     {
         $this->verifyBackupSnapshot($snapshot);
