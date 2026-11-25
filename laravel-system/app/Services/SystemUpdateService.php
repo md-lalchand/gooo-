@@ -68,6 +68,28 @@ class SystemUpdateService
         'certificates',
     ];
 
+    /**
+     * Include every application table, not just the built-in LMS table allowlist.
+     * Ephemeral framework queues/cache/session data is intentionally excluded.
+     */
+    private function backupTableNames(): array
+    {
+        $ephemeral = [
+            'cache', 'cache_locks', 'sessions', 'jobs', 'job_batches',
+            'failed_jobs', 'telescope_entries', 'telescope_entries_tags',
+            'telescope_monitoring', 'pulse_values', 'pulse_entries',
+            'pulse_aggregates',
+        ];
+        $tables = array_unique(array_merge(self::BUSINESS_TABLES, Schema::getTableListing()));
+        return array_values(array_filter($tables, static function ($table) use ($ephemeral) {
+            return is_string($table)
+                && preg_match('/^[A-Za-z0-9_]+$/', $table)
+                && !in_array($table, $ephemeral, true)
+                && !str_starts_with($table, 'telescope_')
+                && !str_starts_with($table, 'pulse_');
+        }));
+    }
+
     public function currentVersion(): string
     {
         try {
@@ -110,7 +132,7 @@ class SystemUpdateService
         $tables = [];
         $counts = [];
 
-        foreach (self::BUSINESS_TABLES as $table) {
+        foreach ($this->backupTableNames() as $table) {
             if (!Schema::hasTable($table)) {
                 continue;
             }
@@ -409,7 +431,7 @@ class SystemUpdateService
             throw new RuntimeException('Backup table-count manifest does not match the table payload.');
         }
 
-        $allowedTables = array_flip(self::BUSINESS_TABLES);
+        $allowedTables = array_flip($this->backupTableNames());
         $validatedTables = [];
 
         foreach ($tablesData as $table => $rows) {
@@ -667,13 +689,13 @@ class SystemUpdateService
             try {
                 // Clear every currently supported business table. Tables absent
                 // from an older snapshot correctly return to an empty state.
-                foreach (array_reverse(self::BUSINESS_TABLES) as $table) {
+                foreach (array_reverse($this->backupTableNames()) as $table) {
                     if (Schema::hasTable($table)) {
                         DB::table($table)->delete();
                     }
                 }
 
-                foreach (self::BUSINESS_TABLES as $table) {
+                foreach (array_keys($tablesData) as $table) {
                     if (!Schema::hasTable($table)) {
                         continue;
                     }
