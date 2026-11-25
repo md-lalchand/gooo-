@@ -59,8 +59,8 @@ class InstallController extends Controller
             'db_username' => 'nullable|string|max:120',
             'db_password' => 'nullable|string|max:200',
             'db_sslmode' => 'nullable|in:disable,prefer,require,verify-ca,verify-full',
-            'db_sslrootcert' => 'nullable|string|max:500',
-            'db_ssl_ca' => 'nullable|string|max:500',
+            'db_sslrootcert' => 'nullable|string|max:500|not_regex:/[;\r\n]/',
+            'db_ssl_ca' => 'nullable|string|max:500|not_regex:/[;\r\n]/',
             'admin_name' => 'required|string|max:120',
             'admin_email' => 'required|email|max:140',
             'admin_password' => ['required', 'string', Password::min(12)->mixedCase()->numbers()->symbols()],
@@ -91,8 +91,11 @@ class InstallController extends Controller
             if ($mysqlSslCa !== '' && (!is_file($mysqlSslCa) || !is_readable($mysqlSslCa))) {
                 return back()->withInput()->withErrors(['db_ssl_ca' => 'The MySQL CA certificate path must point to a readable file.']);
             }
-            if (!$isLocalDatabase && in_array($sslMode, ['require', 'verify-ca', 'verify-full'], true) && $mysqlSslCa === '') {
-                return back()->withInput()->withErrors(['db_ssl_ca' => 'A readable MySQL CA certificate file is required for TLS to a remote database host.']);
+            if (!$isLocalDatabase && $sslMode === 'disable') {
+                return back()->withInput()->withErrors(['db_sslmode' => 'TLS cannot be disabled for a remote MySQL database in production.']);
+            }
+            if (!$isLocalDatabase && $mysqlSslCa === '') {
+                return back()->withInput()->withErrors(['db_ssl_ca' => 'A readable MySQL CA certificate file is required to verify a remote MySQL database host.']);
             }
         }
 
