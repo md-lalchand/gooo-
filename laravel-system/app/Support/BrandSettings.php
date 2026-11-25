@@ -130,7 +130,7 @@ class BrandSettings
         ];
         $mime = $file->getMimeType();
         if (!is_string($mime) || !isset($extensionByMime[$mime])) {
-            throw new \\InvalidArgumentException('Brand images must be PNG, JPEG, WebP, or ICO files. SVG and other active formats are not accepted.');
+            throw new \InvalidArgumentException('Brand images must be PNG, JPEG, WebP, or ICO files. SVG and other active formats are not accepted.');
         }
         $ext = $extensionByMime[$mime];
         $dir = public_path('uploads/branding');
