@@ -60,8 +60,8 @@
                 <form method="POST" action="{{ route('profile.password') }}" class="space-y-3">
                     @csrf @method('PUT')
                     <input type="password" name="current_password" required placeholder="Current Password" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
-                    <input type="password" name="password" required minlength="6" placeholder="New Password (min 6 chars)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
-                    <input type="password" name="password_confirmation" required minlength="6" placeholder="Confirm New Password" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                    <input type="password" name="password" required minlength="12" placeholder="New Password (12+ chars)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                    <input type="password" name="password_confirmation" required minlength="12" placeholder="Confirm New Password" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <button type="submit" class="rounded-xl text-white font-bold px-5 py-2 text-xs" style="background-color: var(--brand-primary)">Update Password</button>
                 </form>
             </div>
