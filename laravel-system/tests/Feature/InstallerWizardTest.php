@@ -108,6 +108,31 @@ class InstallerWizardTest extends TestCase
         $this->assertFileDoesNotExist($this->lockPath);
     }
 
+
+    public function test_installer_does_not_write_install_lock_when_migrations_fail(): void
+    {
+        \Illuminate\Support\Facades\Artisan::shouldReceive('call')
+            ->once()
+            ->with('migrate', ['--force' => true])
+            ->andReturn(1);
+
+        $this->post('/install/run', [
+            'company_name' => 'Retry Academy',
+            'app_url' => 'https://retry.example.com',
+            'support_email' => 'support@retry.example.com',
+            'currency_symbol' => '৳',
+            'roll_prefix' => 'TRY',
+            'db_connection' => 'sqlite',
+            'db_database' => $this->sqliteTestPath,
+            'admin_name' => 'Retry Admin',
+            'admin_email' => 'admin@retry.example.com',
+            'admin_password' => 'RetryAdmin123!',
+        ])->assertSessionHasErrors('db');
+
+        $this->assertFileDoesNotExist($this->lockPath);
+        $this->assertFileExists($this->envPath);
+    }
+
     public function test_uninstalled_app_redirects_to_install_wizard_and_completes_clean_white_label_setup(): void
     {
         $this->get('/')->assertRedirect(route('install.index'));
