@@ -157,7 +157,9 @@ describe('EDUPro Security, RBAC, DB Constraints & Payments', () => {
   test('password hashing, strength checks, signed session tokens, and session revocation work properly', () => {
     assert.equal(isStrongPassword('short1', 8), false);
     assert.equal(isStrongPassword('onlyletters', 8), false);
-    assert.equal(isStrongPassword('StrongPass123', 10), true);
+    assert.equal(isStrongPassword('StrongPass123!', 12), true);
+    assert.equal(isStrongPassword('StrongPass123', 12), false);
+    assert.equal(isStrongPassword('strongpass123!', 12), false);
 
     const hashed = hashPassword('MySecretPass99!');
     assert.equal(verifyPassword('MySecretPass99!', hashed), true);
