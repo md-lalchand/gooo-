@@ -119,7 +119,7 @@ class EnterpriseOpsController extends Controller
         ]);
 
         if ($actor->role === 'branch') {
-            $student = \\App\\Models\\User::findOrFail($data['student_id']);
+            $student = \App\Models\User::findOrFail($data['student_id']);
             if (!$actor->branch_id || (int) $student->branch_id !== (int) $actor->branch_id) {
                 abort(403, 'Branch accounts can only admit students assigned to their own branch.');
             }
