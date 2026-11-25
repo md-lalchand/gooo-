@@ -161,9 +161,9 @@ export function extractAuthTokenFromRequest(req: Request): {
 }
 
 function isHttpsRequest(req: Request): boolean {
-  if (req.secure) return true;
-  const proto = String(req.headers['x-forwarded-proto'] ?? '').toLowerCase();
-  return proto.includes('https');
+  // Express derives req.secure from the socket or its explicitly trusted proxy chain.
+  // Never infer transport security from a client-controlled forwarded header.
+  return req.secure;
 }
 
 export function setAuthSessionCookie(req: Request, res: Response, token: string): void {
