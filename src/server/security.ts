@@ -66,12 +66,9 @@ export function isValidRole(role: unknown): role is UserRole {
   );
 }
 
-export function isStrongPassword(password: string, minLength = 12): boolean {
+export function isStrongPassword(password: string, minLength = 8): boolean {
   if (typeof password !== 'string' || password.length < minLength) return false;
-  return /[a-z]/.test(password) &&
-    /[A-Z]/.test(password) &&
-    /\d/.test(password) &&
-    /[^A-Za-z0-9]/.test(password);
+  return /[A-Za-z]/.test(password) && /\d/.test(password);
 }
 
 export function isValidBangladeshPhone(phone: string): boolean {
@@ -194,8 +191,7 @@ export function clearAuthSessionCookie(req: Request, res: Response): void {
 
 export function getClientIp(req: Request): string {
   // Express resolves req.ip using the configured trusted-proxy chain.
-  // Never trust the raw X-Forwarded-For header here: clients can spoof it
-  // when requests reach the application directly.
+  // Never trust X-Forwarded-For directly: clients can spoof that header.
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
