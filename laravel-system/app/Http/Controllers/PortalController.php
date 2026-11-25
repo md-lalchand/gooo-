@@ -134,7 +134,10 @@ class PortalController extends Controller
             $courses = Course::whereIn('id', $branchCourseIds)->latest()->get();
             $batches = Batch::whereIn('id', $branchBatchIds)->with(['course', 'branch'])->latest()->get();
             $lessons = Lesson::where(function ($query) use ($branchBatchIds, $branchCourseIds) {
-                $query->whereIn('batch_id', $branchBatchIds)->orWhereIn('course_id', $branchCourseIds);
+                $query->whereIn('batch_id', $branchBatchIds)
+                    ->orWhere(function ($shared) use ($branchCourseIds) {
+                        $shared->whereNull('batch_id')->whereIn('course_id', $branchCourseIds);
+                    });
             })->with(['course', 'batch'])->orderBy('order_index')->get();
             $exams = Exam::whereIn('course_id', $branchCourseIds)->with('questions')->get();
             $enrollments = Enrollment::where('branch_id', $user->branch_id)->with(['user', 'course'])->latest()->get();
@@ -168,16 +171,26 @@ class PortalController extends Controller
             $courses = Course::whereIn('id', $teacherCourseIds)->latest()->get();
             $batches = Batch::whereIn('id', $teacherBatchIds)->with(['course', 'branch'])->latest()->get();
             $lessons = Lesson::where(function ($query) use ($teacherBatchIds, $teacherCourseIds) {
-                $query->whereIn('batch_id', $teacherBatchIds)->orWhereIn('course_id', $teacherCourseIds);
+                $query->whereIn('batch_id', $teacherBatchIds)
+                    ->orWhere(function ($shared) use ($teacherCourseIds) {
+                        $shared->whereNull('batch_id')->whereIn('course_id', $teacherCourseIds);
+                    });
             })->with(['course', 'batch'])->orderBy('order_index')->get();
             $exams = Exam::where('teacher_id', $user->id)->orWhereIn('course_id', $teacherCourseIds)->with('questions')->get();
             $questionBank = QuestionBankItem::latest()->get();
             $courseModules = CourseModule::whereIn('course_id', $teacherCourseIds)->with(['course', 'chapters'])->orderBy('order_index')->get();
-            $assignments = CourseAssignment::where(function ($query) use ($teacherCourseIds, $teacherBatchIds, $user) {
-                $query->whereIn('course_id', $teacherCourseIds)
-                    ->orWhereIn('batch_id', $teacherBatchIds)
-                    ->orWhere('created_by', $user->id);
-            })->with(['course', 'submissions.user'])->latest()->get();
+            $teacherStudentIds = Enrollment::whereIn('batch_id', $teacherBatchIds)
+                ->where('status', 'approved')
+                ->pluck('user_id');
+            $assignments = CourseAssignment::where(function ($query) use ($teacherCourseIds, $teacherBatchIds) {
+                $query->whereIn('batch_id', $teacherBatchIds)
+                    ->orWhere(function ($shared) use ($teacherCourseIds) {
+                        $shared->whereNull('batch_id')->whereIn('course_id', $teacherCourseIds);
+                    });
+            })->with([
+                'course',
+                'submissions' => fn ($query) => $query->whereIn('user_id', $teacherStudentIds)->with('user'),
+            ])->latest()->get();
             $courseAnnouncements = CourseAnnouncement::whereIn('course_id', $teacherCourseIds)->with(['course', 'author'])->latest()->get();
             $scormPackages = ScormPackage::whereIn('course_id', $teacherCourseIds)->with('course')->latest()->get();
             return view('portal.index', compact(
