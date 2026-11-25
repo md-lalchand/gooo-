@@ -24,7 +24,7 @@ class PublicEndpointRateLimitTest extends TestCase
         foreach ($expected as $routeName => $middleware) {
             $route = Route::getRoutes()->getByName($routeName);
             $this->assertNotNull($route, "Expected route {$routeName} to be registered.");
-            $this->assertContains($middleware, $route->gatherMiddleware(), "Expected {$routeName} to use {$middleware}.");
+            $this->assertContains($middleware, $route->middleware(), "Expected {$routeName} to use {$middleware}.");
         }
     }
 }
