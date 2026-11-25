@@ -527,7 +527,8 @@ PHP
         $this->assertIsString($encryptedEnvironment);
         $this->assertStringNotContainsString('APP_NAME=', $encryptedEnvironment);
         $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
-        $this->assertSame('lms-portable-backup-v1', $manifest['format'] ?? null);
+        $this->assertSame('lms-portable-backup-v2', $manifest['format'] ?? null);
+        $this->assertArrayHasKey('hmac_sha256', $manifest);
         $this->assertArrayHasKey('uploads/storage-app-public/.backup-root', $manifest['entries'] ?? []);
         $zip->close();
 
@@ -561,7 +562,7 @@ PHP
         $manifest = json_decode((string) $zip->getFromName('manifest.json'), true);
         $this->assertSame('lms-portable-backup-v2', $manifest['format'] ?? null);
         $this->assertArrayHasKey('hmac_sha256', $manifest);
-        $manifest['created_at'] = '2099-01-01T00:00:00+00:00';
+        $manifest['entries']['database.json'] = str_repeat('0', 64);
         $this->assertTrue($zip->deleteName('manifest.json'));
         $this->assertTrue($zip->addFromString('manifest.json', json_encode($manifest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)));
         $this->assertTrue($zip->close());
